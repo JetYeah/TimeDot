@@ -1,0 +1,644 @@
+<Window x:Class="TimeDot.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        Title="TimeDot" Width="90" Height="90"
+        WindowStyle="None" ResizeMode="NoResize"
+        Background="Transparent" Topmost="True" ShowInTaskbar="False"
+        ShowActivated="False" WindowStartupLocation="Manual"
+        FontFamily="Segoe UI, Microsoft YaHei UI" TextOptions.TextRenderingMode="ClearType">
+
+    <!-- 透明异形窗口:用 WindowChrome 玻璃层而非 AllowsTransparency。
+         分层窗口(AllowsTransparency)会让 WebView2 等 HwndHost 子控件收不到鼠标输入,
+         且渲染性能更差;GlassFrameThickness=-1 的整窗玻璃 + 透明背景是标准替代方案。 -->
+    <WindowChrome.WindowChrome>
+        <WindowChrome GlassFrameThickness="-1" CaptionHeight="0"
+                      ResizeBorderThickness="0" CornerRadius="0"
+                      UseAeroCaptionButtons="False"/>
+    </WindowChrome.WindowChrome>
+
+    <Window.Resources>
+        <!-- 缓动资源必须先于引用它的 storyboard 定义(StaticResource 不可前向引用) -->
+        <CubicEase x:Key="EaseOut" EasingMode="EaseOut"/>
+        <SineEase x:Key="EaseSoft" EasingMode="EaseInOut"/>
+
+
+
+        <!-- 展开面板 -->
+        <Storyboard x:Key="PanelIn">
+            <DoubleAnimation Storyboard.TargetName="PanelCard" Storyboard.TargetProperty="Opacity"
+                             From="0" To="1" Duration="0:0:0.16" EasingFunction="{StaticResource EaseOut}"/>
+            <DoubleAnimation Storyboard.TargetName="PanelScale" Storyboard.TargetProperty="ScaleY"
+                             From="0.93" To="1" Duration="0:0:0.2" EasingFunction="{StaticResource EaseOut}"/>
+            <DoubleAnimation Storyboard.TargetName="PanelScale" Storyboard.TargetProperty="ScaleX"
+                             From="0.97" To="1" Duration="0:0:0.2" EasingFunction="{StaticResource EaseOut}"/>
+        </Storyboard>
+
+        <!-- 新行高亮闪现 -->
+        <Storyboard x:Key="RowFlash">
+            <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0.85" To="0" Duration="0:0:1.1"
+                             EasingFunction="{StaticResource EaseOut}"/>
+        </Storyboard>
+
+        <!-- 细滚动条 -->
+        <Style x:Key="ThinScroll" TargetType="ScrollBar">
+            <Setter Property="Width" Value="6"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ScrollBar">
+                        <Grid Background="Transparent">
+                            <Track x:Name="PART_Track" IsDirectionReversed="True">
+                                <Track.Thumb>
+                                    <Thumb>
+                                        <Thumb.Template>
+                                            <ControlTemplate TargetType="Thumb">
+                                                <Border Background="#26000000" CornerRadius="3" Margin="1,2"/>
+                                            </ControlTemplate>
+                                        </Thumb.Template>
+                                    </Thumb>
+                                </Track.Thumb>
+                            </Track>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="Orientation" Value="Horizontal">
+                    <Setter Property="Width" Value="Auto"/>
+                    <Setter Property="Height" Value="6"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- 标签建议芯片(气泡内可点选的历史标签) -->
+        <Style x:Key="SuggestChip" TargetType="Button">
+            <Setter Property="Focusable" Value="False"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Margin" Value="0,0,5,4"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="c" CornerRadius="9" Background="#12C04522"
+                                BorderBrush="#33C04522" BorderThickness="1" Padding="8,2">
+                            <TextBlock Text="{TemplateBinding Content}" FontSize="11" Foreground="#FF5F594E"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="c" Property="Background" Value="#26C04522"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- 圆角输入框外壳 -->
+        <Style x:Key="FieldShell" TargetType="Border">
+            <Setter Property="CornerRadius" Value="7"/>
+            <Setter Property="Background" Value="#0F000000"/>
+            <Setter Property="BorderBrush" Value="{StaticResource Hairline}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="9,0"/>
+            <Style.Triggers>
+                <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                    <Setter Property="BorderBrush" Value="#59C04522"/>
+                    <Setter Property="Background" Value="#16C04522"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+    </Window.Resources>
+
+    <Grid x:Name="Root" Background="{x:Null}">
+
+        <!-- ============ 悬浮球(emotion-ball via WebView2) ============ -->
+        <Grid x:Name="BallHost" Width="84" Height="84" HorizontalAlignment="Left" VerticalAlignment="Top"
+              RenderTransformOrigin="0.5,0.5" IsHitTestVisible="True">
+            <Grid.RenderTransform>
+                <ScaleTransform x:Name="BallScale" ScaleX="1" ScaleY="1"/>
+            </Grid.RenderTransform>
+            <!-- 球体交互由 JS 侧处理,通过 postMessage 通知 C# -->
+            <wv2:WebView2 x:Name="BallWeb" Width="84" Height="84"/>
+        </Grid>
+
+        <!-- ============ 记录面板 ============ -->
+        <Border x:Name="PanelHost" Visibility="Collapsed" Width="402" HorizontalAlignment="Left"
+                VerticalAlignment="Top" Margin="0,0,0,0">
+            <Border x:Name="PanelCard" CornerRadius="14" Opacity="0"
+                    Background="{StaticResource PanelBg}" BorderBrush="{StaticResource Hairline}"
+                    BorderThickness="1" Margin="10"
+                    RenderTransformOrigin="0.5,0.08">
+                <Border.RenderTransform>
+                    <ScaleTransform x:Name="PanelScale" ScaleX="1" ScaleY="1"/>
+                </Border.RenderTransform>
+                <Border.Effect>
+                    <DropShadowEffect Color="#000000" BlurRadius="26" ShadowDepth="8" Opacity="0.32" Direction="270"/>
+                </Border.Effect>
+                <Grid>
+                    <!-- 毛玻璃质感层:细噪点 + 顶部冷光 sheen(铺满含内边距,不拦截交互) -->
+                    <Border x:Name="NoiseLayer" CornerRadius="13" Margin="1" Opacity="0.05" IsHitTestVisible="False"/>
+                    <Border CornerRadius="13" Margin="1" IsHitTestVisible="False">
+                        <Border.Background>
+                            <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                <GradientStop Color="#3CFFFFFF" Offset="0"/>
+                                <GradientStop Color="#00FFFFFF" Offset="0.22"/>
+                                <GradientStop Color="#00000000" Offset="0.75"/>
+                                <GradientStop Color="#16000000" Offset="1"/>
+                            </LinearGradientBrush>
+                        </Border.Background>
+                    </Border>
+                    <Grid Margin="14,10">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- 头部 -->
+                    <Grid Grid.Row="0" Margin="2,0,0,8">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <Ellipse Width="7" Height="7" Fill="{StaticResource Accent}" Margin="0,0,7,0"
+                                     VerticalAlignment="Center"/>
+                            <TextBlock Text="TimeDot" FontSize="12.5" FontWeight="SemiBold"
+                                       Foreground="{StaticResource TextMain}" VerticalAlignment="Center"/>
+                            <TextBlock Text="工时速记" FontSize="10" Margin="8,1,0,0"
+                                       Foreground="{StaticResource TextFaint}" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <Button x:Name="BtnCollapse" HorizontalAlignment="Right" VerticalAlignment="Center"
+                                Click="CollapseClick" Cursor="Hand" Focusable="False">
+                            <Button.Template>
+                                <ControlTemplate TargetType="Button">
+                                    <Border x:Name="b" Background="Transparent" CornerRadius="5" Padding="5,3">
+                                        <TextBlock Text="&#xE70E;" FontFamily="Segoe MDL2 Assets" FontSize="11"
+                                                   Foreground="{StaticResource TextSub}"/>
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="b" Property="Background" Value="#12000000"/>
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Button.Template>
+                        </Button>
+                    </Grid>
+
+                    <!-- 快速新建 -->
+                    <Grid Grid.Row="1" Margin="0,0,0,9">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="1.9*"/>
+                                <ColumnDefinition Width="6"/>
+                                <ColumnDefinition Width="1.1*"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid>
+                                <Border Style="{StaticResource FieldShell}" Height="32">
+                                    <TextBox x:Name="InProject" VerticalContentAlignment="Center" BorderThickness="0"
+                                             Background="Transparent" Foreground="{StaticResource TextMain}"
+                                             CaretBrush="{StaticResource Accent}" FontSize="12.5"
+                                             FontFamily="Consolas, Cascadia Mono"
+                                             KeyDown="ProjectKeyDown"/>
+                                </Border>
+                                <TextBlock Text="项目号 / Project" IsHitTestVisible="False" FontSize="11"
+                                           Foreground="{StaticResource TextFaint}" VerticalAlignment="Center"
+                                           Margin="11,0,0,0">
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding Text, ElementName=InProject}" Value="">
+                                                    <Setter Property="Visibility" Value="Visible"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
+                            </Grid>
+                            <Grid Grid.Column="2">
+                                <Border Style="{StaticResource FieldShell}" Height="32">
+                                    <TextBox x:Name="InUser" VerticalContentAlignment="Center" BorderThickness="0"
+                                             Background="Transparent" Foreground="{StaticResource TextMain}"
+                                             CaretBrush="{StaticResource Accent}" FontSize="12.5"
+                                             KeyDown="UserKeyDown"/>
+                                </Border>
+                                <TextBlock Text="用户" IsHitTestVisible="False" FontSize="11"
+                                           Foreground="{StaticResource TextFaint}" VerticalAlignment="Center"
+                                           Margin="11,0,0,0">
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding Text, ElementName=InUser}" Value="">
+                                                    <Setter Property="Visibility" Value="Visible"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
+                            </Grid>
+                        </Grid>
+                        <Button Grid.Column="1" Click="AddClick" Cursor="Hand" Margin="6,0,0,0" Focusable="False">
+                            <Button.Template>
+                                <ControlTemplate TargetType="Button">
+                                    <Border x:Name="b" CornerRadius="7" Height="32" Padding="13,0" MinWidth="58"
+                                            Background="{StaticResource AccentSoft}" BorderBrush="#4DC04522"
+                                            BorderThickness="1">
+                                        <TextBlock Text="＋ 记录" FontSize="12" HorizontalAlignment="Center"
+                                                   VerticalAlignment="Center" Foreground="{StaticResource Accent}"/>
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="b" Property="Background" Value="#2EC04522"/>
+                                        </Trigger>
+                                        <Trigger Property="IsPressed" Value="True">
+                                            <Setter TargetName="b" Property="Background" Value="#1FC04522"/>
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Button.Template>
+                        </Button>
+                    </Grid>
+
+                    <!-- 搜索 -->
+                    <Grid Grid.Row="2" Margin="0,0,0,8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <Border Style="{StaticResource FieldShell}" Height="30">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="&#xE721;" FontFamily="Segoe MDL2 Assets" FontSize="11"
+                                           Foreground="{StaticResource TextFaint}" VerticalAlignment="Center"
+                                           Margin="0,0,7,0"/>
+                                <TextBox Grid.Column="1" x:Name="InSearch" VerticalContentAlignment="Center"
+                                         BorderThickness="0" Background="Transparent" FontSize="12"
+                                         Foreground="{StaticResource TextMain}" CaretBrush="{StaticResource Accent}"
+                                         TextChanged="SearchChanged" KeyDown="SearchKeyDown"/>
+                            </Grid>
+                        </Border>
+                        <TextBlock Text="搜索 项目 / 用户 / 标签 / 日期" IsHitTestVisible="False" FontSize="11"
+                                   Foreground="{StaticResource TextFaint}" VerticalAlignment="Center"
+                                   Margin="24,0,0,0">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding Text, ElementName=InSearch}" Value="">
+                                            <Setter Property="Visibility" Value="Visible"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                        <Button Grid.Column="1" x:Name="BtnClear" Click="ClearSearchClick" Cursor="Hand"
+                                VerticalAlignment="Center" Margin="4,0,0,0" Focusable="False" Visibility="Collapsed">
+                            <Button.Template>
+                                <ControlTemplate TargetType="Button">
+                                    <Border Background="Transparent" CornerRadius="4" Padding="3">
+                                        <TextBlock Text="&#xE711;" FontFamily="Segoe MDL2 Assets" FontSize="10"
+                                                   Foreground="{StaticResource TextSub}"/>
+                                    </Border>
+                                </ControlTemplate>
+                            </Button.Template>
+                        </Button>
+                    </Grid>
+
+                    <!-- 记录列表:虚拟化 + 回收,长期大量记录也不卡 -->
+                    <Grid Grid.Row="3" MinHeight="64">
+                        <ItemsControl x:Name="List" MaxHeight="396">
+                            <ItemsControl.Template>
+                                <ControlTemplate TargetType="ItemsControl">
+                                    <ScrollViewer VerticalScrollBarVisibility="Auto" CanContentScroll="True">
+                                        <ScrollViewer.Resources>
+                                            <Style TargetType="ScrollBar" BasedOn="{StaticResource ThinScroll}"/>
+                                        </ScrollViewer.Resources>
+                                        <ItemsPresenter/>
+                                    </ScrollViewer>
+                                </ControlTemplate>
+                            </ItemsControl.Template>
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <VirtualizingStackPanel VirtualizationMode="Recycling"/>
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border x:Name="Row" CornerRadius="10" Padding="9,8" Margin="0,0,0,7"
+                                                Background="Transparent" BorderBrush="Transparent"
+                                                BorderThickness="1" Tag="{Binding}">
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+
+                                                <!-- 行首:开始/停止 -->
+                                                <Button Grid.Column="0" Width="36" Height="36" Cursor="Hand"
+                                                        Click="TimerClick" Tag="{Binding}" Focusable="False"
+                                                        ToolTip="开始 / 停止计时" VerticalAlignment="Center">
+                                                    <Button.Template>
+                                                        <ControlTemplate TargetType="Button">
+                                                            <Border x:Name="c" Width="34" Height="34" CornerRadius="17"
+                                                                    Background="Transparent"
+                                                                    BorderBrush="#47C04522" BorderThickness="1.2">
+                                                                <TextBlock x:Name="g" Text="&#xE768;"
+                                                                           FontFamily="Segoe MDL2 Assets" FontSize="12"
+                                                                           Foreground="{StaticResource Accent}"
+                                                                           HorizontalAlignment="Center"
+                                                                           VerticalAlignment="Center"/>
+                                                            </Border>
+                                                            <ControlTemplate.Triggers>
+                                                                <DataTrigger Binding="{Binding IsRunning}" Value="True">
+                                                                    <Setter TargetName="c" Property="Background" Value="{StaticResource Accent}"/>
+                                                                    <Setter TargetName="c" Property="BorderBrush" Value="{StaticResource Accent}"/>
+                                                                    <Setter TargetName="g" Property="Text" Value="&#xE71A;"/>
+                                                                    <Setter TargetName="g" Property="Foreground" Value="#FFFFF6E8"/>
+                                                                </DataTrigger>
+                                                                <Trigger Property="IsMouseOver" Value="True">
+                                                                    <Setter TargetName="c" Property="Background" Value="#1AC04522"/>
+                                                                </Trigger>
+                                                            </ControlTemplate.Triggers>
+                                                        </ControlTemplate>
+                                                    </Button.Template>
+                                                </Button>
+
+                                                <Grid Grid.Column="1" Margin="9,0,0,0">
+                                                    <Grid.RowDefinitions>
+                                                        <RowDefinition Height="Auto"/>
+                                                        <RowDefinition Height="Auto"/>
+                                                        <RowDefinition Height="Auto"/>
+                                                        <RowDefinition Height="Auto"/>
+                                                        <RowDefinition Height="Auto"/>
+                                                    </Grid.RowDefinitions>
+
+                                                    <!-- 行 1:项目 · 用户 … 时长 / 删除 -->
+                                                    <Grid Grid.Row="0">
+                                                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                                            <TextBlock Text="{Binding Project}" FontSize="13" FontWeight="SemiBold"
+                                                                       FontFamily="Consolas, Cascadia Mono"
+                                                                       Foreground="#FF26231E" TextTrimming="CharacterEllipsis"
+                                                                       MaxWidth="150" VerticalAlignment="Center"/>
+                                                            <TextBlock Text="{Binding User}" FontSize="11" Margin="8,1,0,0"
+                                                                       Foreground="{StaticResource TextSub}"
+                                                                       TextTrimming="CharacterEllipsis" MaxWidth="100"
+                                                                       VerticalAlignment="Center"/>
+                                                        </StackPanel>
+                                                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                                            <TextBlock x:Name="dur" Text="{Binding DurationText}" FontSize="13"
+                                                                       FontFamily="Consolas, Cascadia Mono"
+                                                                       Foreground="#FF4A443A" VerticalAlignment="Center"/>
+                                                            <Button Click="TagBtnClick" Tag="{Binding}" Focusable="False" Cursor="Hand"
+                                                                    Margin="7,0,0,0" VerticalAlignment="Center"
+                                                                    ToolTip="添加标签(回车确认)">
+                                                                <Button.Template>
+                                                                    <ControlTemplate TargetType="Button">
+                                                                        <Border Background="Transparent" CornerRadius="4" Padding="3,1">
+                                                                            <TextBlock x:Name="tag" Text="&#xE8EC;" FontFamily="Segoe MDL2 Assets"
+                                                                                       FontSize="11" Foreground="{StaticResource TextFaint}"/>
+                                                                        </Border>
+                                                                        <ControlTemplate.Triggers>
+                                                                            <Trigger Property="IsMouseOver" Value="True">
+                                                                                <Setter TargetName="tag" Property="Foreground" Value="{StaticResource Accent}"/>
+                                                                            </Trigger>
+                                                                        </ControlTemplate.Triggers>
+                                                                    </ControlTemplate>
+                                                                </Button.Template>
+                                                            </Button>
+                                                            <Button Click="ShotClick" Tag="{Binding}" Focusable="False" Cursor="Hand"
+                                                                    Margin="7,0,0,0" VerticalAlignment="Center"
+                                                                    ToolTip="截图:框选屏幕区域 (Ctrl+V 可粘贴剪贴板图片)">
+                                                                <Button.Template>
+                                                                    <ControlTemplate TargetType="Button">
+                                                                        <Border Background="Transparent" CornerRadius="4" Padding="3,1">
+                                                                            <TextBlock x:Name="cam" Text="&#xE722;" FontFamily="Segoe MDL2 Assets"
+                                                                                       FontSize="11" Foreground="{StaticResource TextFaint}"/>
+                                                                        </Border>
+                                                                        <ControlTemplate.Triggers>
+                                                                            <Trigger Property="IsMouseOver" Value="True">
+                                                                                <Setter TargetName="cam" Property="Foreground" Value="{StaticResource Accent}"/>
+                                                                            </Trigger>
+                                                                        </ControlTemplate.Triggers>
+                                                                    </ControlTemplate>
+                                                                </Button.Template>
+                                                            </Button>
+                                                            <Button Click="DeleteClick" Tag="{Binding}" Focusable="False"
+                                                                    Cursor="Hand" Margin="7,0,-3,0" VerticalAlignment="Center"
+                                                                    ToolTip="删除">
+                                                                <Button.Template>
+                                                                    <ControlTemplate TargetType="Button">
+                                                                        <Border Background="Transparent" CornerRadius="4" Padding="3,1">
+                                                                            <TextBlock x:Name="x" Text="&#xE711;" FontFamily="Segoe MDL2 Assets"
+                                                                                       FontSize="9" Foreground="{StaticResource TextFaint}"/>
+                                                                        </Border>
+                                                                        <ControlTemplate.Triggers>
+                                                                            <Trigger Property="IsMouseOver" Value="True">
+                                                                                <Setter TargetName="x" Property="Foreground" Value="{StaticResource Danger}"/>
+                                                                            </Trigger>
+                                                                            <DataTrigger Binding="{Binding ConfirmDelete}" Value="True">
+                                                                                <Setter TargetName="x" Property="Text" Value="确认删除?"/>
+                                                                                <Setter TargetName="x" Property="FontFamily" Value="Segoe UI"/>
+                                                                                <Setter TargetName="x" Property="FontSize" Value="9"/>
+                                                                                <Setter TargetName="x" Property="Foreground" Value="{StaticResource Danger}"/>
+                                                                            </DataTrigger>
+                                                                        </ControlTemplate.Triggers>
+                                                                    </ControlTemplate>
+                                                                </Button.Template>
+                                                            </Button>
+                                                        </StackPanel>
+                                                    </Grid>
+
+                                                    <!-- 行 2:短语标签(回车添加,点 × 删除,可按标签检索) -->
+                                                    <StackPanel Grid.Row="1" Margin="0,3,0,1">
+                                                        <ItemsControl ItemsSource="{Binding Tags}">
+                                                            <ItemsControl.ItemsPanel>
+                                                                <ItemsPanelTemplate>
+                                                                    <WrapPanel/>
+                                                                </ItemsPanelTemplate>
+                                                            </ItemsControl.ItemsPanel>
+                                                            <ItemsControl.ItemTemplate>
+                                                                <DataTemplate>
+                                                                    <Border CornerRadius="9" Background="#18C04522"
+                                                                            BorderBrush="#3CC04522" BorderThickness="1"
+                                                                            Margin="0,0,5,4" Padding="8,1.5,3,2.5">
+                                                                        <StackPanel Orientation="Horizontal">
+                                                                            <TextBlock Text="{Binding}" FontSize="11" MaxWidth="120"
+                                                                                       Foreground="#FF5F594E" TextTrimming="CharacterEllipsis"
+                                                                                       VerticalAlignment="Center"/>
+                                                                            <Button Click="TagRemoveClick" Focusable="False" Cursor="Hand"
+                                                                                    Margin="3,0,-1,0" VerticalAlignment="Center" ToolTip="删除标签">
+                                                                                <Button.Template>
+                                                                                    <ControlTemplate TargetType="Button">
+                                                                                        <Border Background="Transparent" CornerRadius="4" Padding="3,1">
+                                                                                            <TextBlock x:Name="x" Text="&#xE711;" FontFamily="Segoe MDL2 Assets"
+                                                                                                       FontSize="8" Foreground="#FF98917F"/>
+                                                                                        </Border>
+                                                                                        <ControlTemplate.Triggers>
+                                                                                            <Trigger Property="IsMouseOver" Value="True">
+                                                                                                <Setter TargetName="x" Property="Foreground" Value="{StaticResource Danger}"/>
+                                                                                            </Trigger>
+                                                                                        </ControlTemplate.Triggers>
+                                                                                    </ControlTemplate>
+                                                                                </Button.Template>
+                                                                            </Button>
+                                                                        </StackPanel>
+                                                                    </Border>
+                                                                </DataTemplate>
+                                                            </ItemsControl.ItemTemplate>
+                                                        </ItemsControl>
+                                                    </StackPanel>
+
+                                                    <!-- 行 3:自由文字备注(可多行) -->
+                                                    <Grid Grid.Row="2" Margin="0,3,0,1">
+                                                        <TextBox Text="{Binding Note, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                                 BorderThickness="0" Background="Transparent" FontSize="11.5"
+                                                                 Foreground="#FF5F594E" CaretBrush="{StaticResource Accent}"
+                                                                 TextWrapping="Wrap" AcceptsReturn="True" MaxHeight="120"
+                                                                 VerticalScrollBarVisibility="Auto" Padding="0" LostFocus="NoteLostFocus"/>
+                                                        <TextBlock Text="记点什么吧~" IsHitTestVisible="False" FontSize="11"
+                                                                   Foreground="#FF98917F" VerticalAlignment="Top" Margin="1,1,0,0">
+                                                            <TextBlock.Style>
+                                                                <Style TargetType="TextBlock">
+                                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                                    <Style.Triggers>
+                                                                        <DataTrigger Binding="{Binding Note}" Value="">
+                                                                            <Setter Property="Visibility" Value="Visible"/>
+                                                                        </DataTrigger>
+                                                                    </Style.Triggers>
+                                                                </Style>
+                                                            </TextBlock.Style>
+                                                        </TextBlock>
+                                                    </Grid>
+
+                                                    <!-- 行 4:截图缩略图(点击看原图,× 删除) -->
+                                                    <ItemsControl Grid.Row="3" ItemsSource="{Binding Shots}" Margin="0,3,0,0">
+                                                        <ItemsControl.ItemsPanel>
+                                                            <ItemsPanelTemplate>
+                                                                <WrapPanel/>
+                                                            </ItemsPanelTemplate>
+                                                        </ItemsControl.ItemsPanel>
+                                                        <ItemsControl.ItemTemplate>
+                                                            <DataTemplate>
+                                                                <Grid Margin="0,0,7,6">
+                                                                    <Button Click="ShotOpenClick" Tag="{Binding}" Cursor="Hand"
+                                                                            Focusable="False" ToolTip="{Binding Tip}" Padding="0">
+                                                                        <Button.Template>
+                                                                            <ControlTemplate TargetType="Button">
+                                                                                <Border x:Name="b" CornerRadius="6" BorderBrush="#3CC04522"
+                                                                                        BorderThickness="1" Background="#0A000000" Padding="2">
+                                                                                    <Image Source="{Binding Thumb}" Height="62" Stretch="Uniform"/>
+                                                                                </Border>
+                                                                                <ControlTemplate.Triggers>
+                                                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                                                        <Setter TargetName="b" Property="BorderBrush" Value="{StaticResource Accent}"/>
+                                                                                    </Trigger>
+                                                                                </ControlTemplate.Triggers>
+                                                                            </ControlTemplate>
+                                                                        </Button.Template>
+                                                                    </Button>
+                                                                    <Button Click="ShotRemoveClick" Tag="{Binding}" Focusable="False" Cursor="Hand"
+                                                                            HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-5,-5,0"
+                                                                            Width="16" Height="16" ToolTip="删除截图">
+                                                                        <Button.Template>
+                                                                            <ControlTemplate TargetType="Button">
+                                                                                <Border Background="#E6F7F5EF" CornerRadius="8">
+                                                                                    <TextBlock x:Name="x" Text="&#xE711;" FontFamily="Segoe MDL2 Assets"
+                                                                                               FontSize="8" Foreground="#FF98917F"
+                                                                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                                                </Border>
+                                                                                <ControlTemplate.Triggers>
+                                                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                                                        <Setter TargetName="x" Property="Foreground" Value="{StaticResource Danger}"/>
+                                                                                    </Trigger>
+                                                                                </ControlTemplate.Triggers>
+                                                                            </ControlTemplate>
+                                                                        </Button.Template>
+                                                                    </Button>
+                                                                </Grid>
+                                                            </DataTemplate>
+                                                        </ItemsControl.ItemTemplate>
+                                                    </ItemsControl>
+
+                                                    <!-- 行 5:元信息 -->
+                                                    <TextBlock Grid.Row="4" Text="{Binding MetaText}" FontSize="10"
+                                                               Foreground="{StaticResource TextFaint}" Margin="0,1,0,0"/>
+                                                </Grid>
+                                            </Grid>
+                                        </Border>
+                                        <DataTemplate.Triggers>
+                                            <DataTrigger Binding="{Binding IsRunning}" Value="True">
+                                                <Setter TargetName="Row" Property="Background" Value="#0DC04522"/>
+                                                <Setter TargetName="Row" Property="BorderBrush" Value="{StaticResource AccentDim}"/>
+                                                <Setter TargetName="dur" Property="Foreground" Value="{StaticResource Accent}"/>
+                                            </DataTrigger>
+                                            <Trigger SourceName="Row" Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Row" Property="Background" Value="#0A000000"/>
+                                            </Trigger>
+                                        </DataTemplate.Triggers>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <TextBlock x:Name="EmptyHint" Text="暂无记录 — 填写项目号和用户开始" FontSize="11"
+                                   Foreground="{StaticResource TextFaint}" HorizontalAlignment="Center"
+                                   VerticalAlignment="Center" Margin="0,26,0,10" Visibility="Collapsed"/>
+                    </Grid>
+
+                    <!-- 底部 -->
+                    <Border Grid.Row="4" BorderBrush="{StaticResource Hairline}" BorderThickness="0,1,0,0"
+                            Margin="2,8,2,0" Padding="0,7,0,0">
+                        <Grid>
+                            <TextBlock x:Name="FooterText" Text="共 0 条 · 今日 0:00" FontSize="10.5"
+                                       Foreground="{StaticResource TextSub}" VerticalAlignment="Center"/>
+                            <TextBlock Text="JSONL · 本地" FontSize="9" HorizontalAlignment="Right"
+                                       Foreground="{StaticResource TextFaint}" VerticalAlignment="Center"/>
+                        </Grid>
+                    </Border>
+                    </Grid>
+                </Grid>
+            </Border>
+        </Border>
+
+        <!-- ============ 标签气泡(行首“标签”按钮弹出) ============ -->
+        <Popup x:Name="TagPopup" AllowsTransparency="True" StaysOpen="False"
+               Placement="Bottom" PopupAnimation="Fade">
+            <Border CornerRadius="10" Background="#F5F7F5EF" BorderBrush="#4DC04522" BorderThickness="1"
+                    Width="228" Padding="10" Margin="8">
+                <Border.Effect>
+                    <DropShadowEffect Color="#000000" BlurRadius="16" ShadowDepth="4" Opacity="0.22" Direction="270"/>
+                </Border.Effect>
+                <StackPanel>
+                    <TextBlock Text="新标签" FontSize="10.5" Foreground="#FF98917F" Margin="1,0,0,4"/>
+                    <Border CornerRadius="7" Background="#0F000000" BorderBrush="#16000000"
+                            BorderThickness="1" Padding="8,0">
+                        <TextBox x:Name="TagPopupInput" BorderThickness="0" Background="Transparent" FontSize="12"
+                                 VerticalContentAlignment="Center"
+                                 Foreground="#FF26231E" CaretBrush="{StaticResource Accent}" Padding="0"
+                                 KeyDown="TagPopupInputKeyDown" Height="26"/>
+                    </Border>
+                    <TextBlock x:Name="TagPopupSuggestLabel" Text="历史标签(点选添加)" FontSize="10.5"
+                               Foreground="#FF98917F" Margin="1,9,0,4"/>
+                    <ScrollViewer MaxHeight="150" VerticalScrollBarVisibility="Auto">
+                        <WrapPanel x:Name="TagPopupSuggest"/>
+                    </ScrollViewer>
+                </StackPanel>
+            </Border>
+        </Popup>
+
+        <!-- ============ 吸边小条 ============ -->
+        <Border x:Name="StripHost" Visibility="Collapsed" HorizontalAlignment="Left" VerticalAlignment="Top"
+                CornerRadius="4" Background="#E8F4F0E6" BorderBrush="#4DC04522" BorderThickness="1"
+                Cursor="SizeAll" MouseLeftButtonDown="StripDown" MouseMove="StripMove"
+                MouseLeftButtonUp="StripUp" MouseEnter="StripEnter" MouseLeave="StripLeave">
+            <Border x:Name="StripCore" Background="#80C04522" CornerRadius="2" Opacity="0.35"
+                    HorizontalAlignment="Center" VerticalAlignment="Center"/>
+        </Border>
+    </Grid>
+</Window>

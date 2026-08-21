@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  * { margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100%;
+    background: transparent;
+    overflow: hidden;
+    cursor: pointer;
+  }
+  #ball-container {
+    width: 84px; height: 84px;
+    /* 让 SVG 球体在 84x84 容器内居中显示 */
+    display: flex; align-items: center; justify-content: center;
+  }
+  #ball-container > svg {
+    width: 70px; height: 70px;
+  }
+</style>
+</head>
+<body>
+<div id="ball-container"></div>
+
+<script src="rings.js"></script>
+<script src="emotions.js"></script>
+<script src="ball.js"></script>
+<script src="engine.js"></script>
+
+<script>
+(function () {
+  'use strict';
+
+  var container = document.getElementById('ball-container');
+
+  function post(obj) {
+    if (window.chrome && window.chrome.webview) {
+      window.chrome.webview.postMessage(obj);
+    }
+  }
+
+  console.log('[TimeDot] scripts loaded, EmotionBall=' + typeof EmotionBall);
+
+  var ball;
+  try {
+    // 与 emotion-ball 原仓库演示页主球一致的挂载方式:
+    // 全功能模式(带 zzz 睡眠粒子/彩带特效),autostart 默认开启。
+    // 注意不要传 lite——lite 会禁用 zzz,球睡眠时只剩闭眼没存母,看起来像坏了。
+    ball = EmotionBall.create(container, {
+      emotion: '02',    // 待机放空(默认表情)
+      shape: 'blob',    // 圆胖体型
+      idle: { standbyAfter: 60000, sleepAfter: 180000 }  // 1分钟待机/3分钟入睡
+    });
+
+    post({ type: 'init', ok: true });
+  } catch (err) {
+    post({ type: 'init', ok: false, error: String(err) });
+    return;
+  }
+
+  // ---- 接收 C# 发来的消息 ----
+  // 记录宿主逻辑状态对应的表情,唤醒时恢复(计时中→'22',空闲→'02')
+  var hostEmotion = '02';
+  if (window.chrome && window.chrome.webview) {
+    window.chrome.webview.addEventListener('message', function (e) {
+      var msg = e.data;
+      if (!msg || typeof msg !== 'object') return;
+
+      // 切换表情
+      if (msg.emotionId) {
+        hostEmotion = msg.emotionId;
+        ball.setEmotion(msg.emotionId);
+      }
+
+      // 执行特效
+      if (msg.action) {
+        switch (msg.action) {
+          case 'spin':   ball.spin(msg.duration || 3); break;
+          case 'burst':  ball.burst(msg.count || 24); break;
+          case 'bounce': ball.bounce(); break;
+        }
+      }
+
+      // 设置注视方向 (x, y 范围 [-1, 1])
+      if (msg.gaze) {
+        ball.setGaze(msg.gaze.x || 0, msg.gaze.y || 0);
+      }
+
+      // 设置样式
+      if (msg.style) {
+        ball.setStyle(msg.style);
+      }
+    });
+  }
+
+  // ---- 交互:JS 侧捕获鼠标,转发给 C# 驱动窗口移动 ----
+  var dragging = false;
+  var lastMovePost = 0;
+
+  // 唤醒:重置 idle 计时;若正睡着('00')则恢复宿主状态表情
+  function wake() {
+    ball.resetIdle();
+    if (ball.emotionId === '00') ball.setEmotion(hostEmotion);
+  }
+
+  console.log('[TimeDot] registering interaction listeners');
+
+  container.addEventListener('pointerdown', function (e) {
+    if (e.button !== 0) return;
+    wake();
+    dragging = true;
+    try { container.setPointerCapture(e.pointerId); } catch (err) {}
+    post({ type: 'dragstart' });
+    e.preventDefault();
+  });
+
+  document.addEventListener('pointermove', function (e) {
+    var now = performance.now();
+
+    // 球看向鼠标方向(gaze)
+    var rect = container.getBoundingClientRect();
+    var dx = (e.clientX - (rect.left + rect.width / 2)) / (rect.width / 2);
+    var dy = (e.clientY - (rect.top + rect.height / 2)) / (rect.height / 2);
+    ball.setGaze(
+      Math.max(-1, Math.min(1, dx * 0.6)),
+      Math.max(-1, Math.min(1, dy * 0.6))
+    );
+
+    if (dragging) {
+      // 拖拽中:高频转发(8ms 节流),C# 用光标绝对坐标驱动窗口
+      if (now - lastMovePost > 8) {
+        lastMovePost = now;
+        post({ type: 'dragmove' });
+      }
+    } else if (now - lastMovePost > 200) {
+      // 悬停移动:低频转发,防止自动吸边误判空闲;同时续上球的 idle 计时
+      lastMovePost = now;
+      wake();
+      post({ type: 'move' });
+    }
+  });
+
+  document.addEventListener('pointerup', function (e) {
+    if (e.button !== 0 || !dragging) return;
+    dragging = false;
+    try { container.releasePointerCapture(e.pointerId); } catch (err) {}
+    post({ type: 'dragend' }); // C# 侧判断位移:没移动 → 点击展开/收起
+  });
+
+  document.addEventListener('pointercancel', function () {
+    if (!dragging) return;
+    dragging = false;
+    post({ type: 'dragend' });
+  });
+
+  container.addEventListener('mouseenter', function () {
+    wake(); // 悬停即唤醒睡着的球
+    post({ type: 'enter' }); // C# 悬停放大
+  });
+
+  container.addEventListener('mouseleave', function () {
+    post({ type: 'leave' }); // C# 恢复原大小
+    ball.setGaze(0, 0);
+  });
+
+})();
+</script>
+</body>
+</html>
