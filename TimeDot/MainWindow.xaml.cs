@@ -48,6 +48,10 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _tick = new() { Interval = TimeSpan.FromSeconds(1) };
     private int _tickCount;
 
+    // 球外空气墙治理:光标在 WebView2 方形内、圆形外时让其点击穿透到下方应用
+    private readonly DispatcherTimer _passTimer = new() { Interval = TimeSpan.FromMilliseconds(40) };
+    private bool _webPass;
+
     // WebView2 emotion-ball 状态
     private bool _webReady;
     private string _pendingEmotion = "02";
@@ -60,6 +64,18 @@ public partial class MainWindow : Window
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetCursorPos(out POINT lpPoint);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT { public int Left, Top, Right, Bottom; }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
+    [DllImport("user32.dll")] private static extern int GetWindowLong(IntPtr hWnd, int index);
+    [DllImport("user32.dll")] private static extern int SetWindowLong(IntPtr hWnd, int index, int value);
+    private const int GWL_EXSTYLE = -20;
+    private const int WS_EX_TRANSPARENT = 0x00000020;
 
     // ---------- 球交互:JS 侧捕获鼠标,通过 postMessage 通知 C# 驱动窗口 ----------
 
@@ -101,7 +117,7 @@ public partial class MainWindow : Window
         if (!_dragMoved)
         {
             if (_mode == Mode.Free) ExpandPanel();
-            else if (_mode == Mode.Expanded) CollapsePanel(true);
+            else if (_mode == Mode.Expanded && !_panelPinned) CollapsePanel(true);
             return;
         }
         if (_mode == Mode.Expanded) { SavePosition(); return; } // 展开态拖动仅移动,不吸附
@@ -126,7 +142,8 @@ public partial class MainWindow : Window
 
         _autoDockTimer.Tick += (_, _) => AutoDockCheck();
         _tick.Tick += (_, _) => OnTick();
-        Deactivated += (_, _) => { if (_mode == Mode.Expanded) CollapsePanel(true); };
+        _passTimer.Tick += (_, _) => UpdateWebPass();
+        Deactivated += (_, _) => { if (_mode == Mode.Expanded && !_panelPinned) CollapsePanel(true); };
         PreviewMouseMove += (_, _) => _lastActivity = DateTime.Now;
         MouseEnter += (_, _) => _lastActivity = DateTime.Now;
         PreviewKeyDown += (s, e) =>
@@ -134,6 +151,7 @@ public partial class MainWindow : Window
             if (e.Key != Key.Escape || _mode != Mode.Expanded) return;
             // 焦点在搜索框时,Esc 交给搜索框语义(清空搜索),不收起面板
             if (ReferenceEquals(Keyboard.FocusedElement, InSearch)) return;
+            if (_panelPinned) return; // 固定中,Esc 不收起
             CollapsePanel(true);
         };
         StripHost.LostMouseCapture += (s, e) => _stripDragging = false;
@@ -171,6 +189,7 @@ public partial class MainWindow : Window
         _ = InitBallWeb();
         _autoDockTimer.Start();
         _tick.Start();
+        _passTimer.Start();
     }
 
     /// <summary>生成 96×96 灰噪点并平铺,给面板"磨砂玻璃"的颗粒感(一次性渲染并冻结)。</summary>
@@ -276,7 +295,8 @@ public partial class MainWindow : Window
     }
 
     // ---------- 展开与收起 ----------
-    // 注:收起时不缩窗,只藏面板 —— 窗口矩形保持,球原地不动,透明区域天然点击穿透。
+    // 注:收起后缩窗回球大小(以球心重新居中,球视觉不动)。
+    // 不能保持展开矩形:WindowChrome 方案下透明区域并不点击穿透,大矩形是隐形空气墙。
 
     private void ExpandPanel(bool focusInput = true)
     {
@@ -298,22 +318,43 @@ public partial class MainWindow : Window
         _lastActivity = DateTime.Now;
     }
 
+    private bool _panelPinned;
+
+    /// <summary>pin 按钮:固定面板(失焦/Esc/点球都不收起),再点一次解锁。</summary>
+    private void PinClick(object sender, RoutedEventArgs e)
+    {
+        _panelPinned = !_panelPinned;
+        UpdatePinVisual();
+    }
+
+    private void UpdatePinVisual()
+    {
+        if (BtnPin.Template?.FindName("ic", BtnPin) is System.Windows.Controls.TextBlock ic)
+        {
+            ic.Text = _panelPinned ? "\uE77A" : "\uE718"; // Pinned / Pin
+            ic.Foreground = (Brush)FindResource(_panelPinned ? "Accent" : "TextSub");
+        }
+        BtnPin.ToolTip = _panelPinned ? "取消固定" : "固定面板（失焦不收起）";
+    }
+
     private void CollapsePanel(bool animate)
     {
         if (_mode != Mode.Expanded) return;
+        if (_panelPinned) { _panelPinned = false; UpdatePinVisual(); } // 显式收起时解锁
         _mode = Mode.Free;
         StartLoops(); // 恢复呼吸动画(小球窗口面,开销可忽略)
         var fade = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(110))
         { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn } };
         if (animate)
         {
-            fade.Completed += (_, _) => PanelHost.Visibility = Visibility.Collapsed;
+            fade.Completed += (_, _) => { PanelHost.Visibility = Visibility.Collapsed; LayoutBallOnly(); };
             PanelCard.BeginAnimation(OpacityProperty, fade);
         }
         else
         {
             PanelCard.BeginAnimation(OpacityProperty, null);
             PanelHost.Visibility = Visibility.Collapsed;
+            LayoutBallOnly();
         }
         SavePosition();
     }
@@ -601,11 +642,10 @@ public partial class MainWindow : Window
                 {
                     var uri = new Uri(e.Request.Uri);
                     var localPath = uri.AbsolutePath.TrimStart('/');
-                    var filePath = Path.Combine(webDir, localPath.Replace('/', Path.DirectorySeparatorChar));
-                    if (File.Exists(filePath))
+                    var stream = OpenWebAsset(webDir, localPath);
+                    if (stream != null)
                     {
-                        var stream = File.OpenRead(filePath);
-                        var mime = GetMimeType(filePath);
+                        var mime = GetMimeType(localPath);
                         e.Response = cwv.Environment.CreateWebResourceResponse(stream, 200, "OK", $"Content-Type: {mime}");
                     }
                 }
@@ -651,8 +691,9 @@ public partial class MainWindow : Window
                 catch { /* 解析失败静默忽略 */ }
             };
 
-            if (Directory.Exists(webDir))
-                cwv.Navigate("https://app.local/ball.html");
+            // 直接导航:资源由 OpenWebAsset 提供(磁盘 Web 目录优先,内嵌资源兜底),
+            // 不再要求磁盘目录存在(单文件独立分发时只有 exe)
+            cwv.Navigate("https://app.local/ball.html");
         }
         catch (Exception ex)
         {
@@ -677,7 +718,48 @@ public partial class MainWindow : Window
         _       => "application/octet-stream"
     };
 
-    /// <summary>向 emotion-ball 推送表情状态。</summary>
+    /// <summary>打开 Web 前端资源:优先读磁盘(开发态),否则读内嵌资源(单文件发布独立分发)。</summary>
+    private static Stream? OpenWebAsset(string webDir, string localPath)
+    {
+        var filePath = Path.Combine(webDir, localPath.Replace('/', Path.DirectorySeparatorChar));
+        if (File.Exists(filePath)) return File.OpenRead(filePath);
+        var name = typeof(MainWindow).Namespace + ".Web." + localPath.Replace('/', '.');
+        return System.Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream(name);
+    }
+
+    /// <summary>
+    /// 球外空气墙治理:WebView2 是 84×84 方形窗口,球是圆的,方形四角会挡住下方软件的点击。
+    /// 每 40ms 检查光标:在方形内、圆形外(半径 90% 半边长)时给 WebView2 的 hwnd 加
+    /// WS_EX_TRANSPARENT 让点击穿透到下方应用;回到圆内自动恢复,球的交互不受影响。
+    /// </summary>
+    private void UpdateWebPass()
+    {
+        try
+        {
+            var h = BallWeb.Handle;
+            if (h == IntPtr.Zero) return;
+            var want = false;
+            if (Visibility == Visibility.Visible && BallHost.Visibility == Visibility.Visible)
+            {
+                if (GetWindowRect(h, out var r))
+                {
+                    GetCursorPos(out var p);
+                    double cx = (r.Left + r.Right) / 2.0, cy = (r.Top + r.Bottom) / 2.0;
+                    double rad = (r.Right - r.Left) / 2.0 * 0.90; // 球可视半径约占 88%,留少量余量
+                    double dx = p.X - cx, dy = p.Y - cy;
+                    bool inSquare = p.X >= r.Left && p.X < r.Right && p.Y >= r.Top && p.Y < r.Bottom;
+                    want = inSquare && dx * dx + dy * dy > rad * rad;
+                }
+            }
+            if (want == _webPass) return;
+            int ex = GetWindowLong(h, GWL_EXSTYLE);
+            SetWindowLong(h, GWL_EXSTYLE, want ? ex | WS_EX_TRANSPARENT : ex & ~WS_EX_TRANSPARENT);
+            _webPass = want;
+        }
+        catch { /* WebView2 未就绪等异常时静默跳过 */ }
+    }
+
+    /// <summary>向 emotion-ball 推送表情。</summary>
     internal void SendEmotion(string emotionId)
     {
         if (emotionId == _lastEmotion) return; // 避免重复发送

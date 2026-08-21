@@ -166,22 +166,41 @@
                             <TextBlock Text="工时速记" FontSize="10" Margin="8,1,0,0"
                                        Foreground="{StaticResource TextFaint}" VerticalAlignment="Center"/>
                         </StackPanel>
-                        <Button x:Name="BtnCollapse" HorizontalAlignment="Right" VerticalAlignment="Center"
-                                Click="CollapseClick" Cursor="Hand" Focusable="False">
-                            <Button.Template>
-                                <ControlTemplate TargetType="Button">
-                                    <Border x:Name="b" Background="Transparent" CornerRadius="5" Padding="5,3">
-                                        <TextBlock Text="&#xE70E;" FontFamily="Segoe MDL2 Assets" FontSize="11"
-                                                   Foreground="{StaticResource TextSub}"/>
-                                    </Border>
-                                    <ControlTemplate.Triggers>
-                                        <Trigger Property="IsMouseOver" Value="True">
-                                            <Setter TargetName="b" Property="Background" Value="#12000000"/>
-                                        </Trigger>
-                                    </ControlTemplate.Triggers>
-                                </ControlTemplate>
-                            </Button.Template>
-                        </Button>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                            <!-- pin:固定面板,失焦/Esc/点球都不收起;再点一次解锁 -->
+                            <Button x:Name="BtnPin" Click="PinClick" Cursor="Hand" Focusable="False"
+                                    ToolTip="固定面板（失焦不收起）">
+                                <Button.Template>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border x:Name="b" Background="Transparent" CornerRadius="5" Padding="5,3">
+                                            <TextBlock x:Name="ic" Text="&#xE718;" FontFamily="Segoe MDL2 Assets" FontSize="11"
+                                                       Foreground="{StaticResource TextSub}"/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="b" Property="Background" Value="#12000000"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Button.Template>
+                            </Button>
+                            <Button x:Name="BtnCollapse"
+                                    Click="CollapseClick" Cursor="Hand" Focusable="False">
+                                <Button.Template>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border x:Name="b" Background="Transparent" CornerRadius="5" Padding="5,3">
+                                            <TextBlock Text="&#xE70E;" FontFamily="Segoe MDL2 Assets" FontSize="11"
+                                                       Foreground="{StaticResource TextSub}"/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="b" Property="Background" Value="#12000000"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Button.Template>
+                            </Button>
+                        </StackPanel>
                     </Grid>
 
                     <!-- 快速新建 -->
