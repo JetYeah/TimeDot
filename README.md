@@ -63,3 +63,11 @@ E:\ClaudeCode\prj1\TimeDot\bin\Release\net8.0-windows\TimeDot.exe
 - **误触保护**:不足 1 秒的计时段视为误触直接丢弃,不产生空段
 - **单计时**:同一时刻只允许一条记录计时(开始新条自动停旧条),语义干净
 - **删错保护**:删除需连点两次确认,3 秒未复点自动撤销
+
+## 致谢与许可
+
+本项目悬浮球前端(`TimeDot/Web/` 目录:`ball.html`、`ball.js`、`engine.js`、`rings.js`、`emotions.js`)源自开源项目 **[emotion-ball](https://github.com/sam70361/emotion-ball)**(作者 [sam70361](https://github.com/sam70361)),按其许可证要求进行了修改与集成,特此致谢。
+
+该部分代码及其视觉形象(球体造型、眼部设计、彩带特效等)遵循原项目的 **"Learning & Research Only License"(仅供学习研究许可)**,完整文本见 [`TimeDot/Web/LICENSE`](TimeDot/Web/LICENSE) 与 [`TimeDot/Web/NOTICE.md`](TimeDot/Web/NOTICE.md)。
+
+> ⚠️ **非商业限制**:该许可证允许学习、研究、修改及非商业场景的分享,但**禁止任何商业用途**(售卖、付费授权、集成到商业产品或服务等)。由于本项目集成了该前端,TimeDot 整体同样不得用于商业用途。
