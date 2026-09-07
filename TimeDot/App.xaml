@@ -1,0 +1,26 @@
+<Application x:Class="TimeDot.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             ShutdownMode="OnExplicitShutdown">
+    <Application.Resources>
+        <!-- 主题:纸感浅色。象牙纸色面板与球体同为浅色家族,
+             墨色正文(14:1)、暖灰次级(5.5:1)、朱砂强调(4.6:1)均满足对比度要求,
+             细线/悬停用低透明度墨色而非白色 -->
+        <SolidColorBrush x:Key="Accent" Color="#FFC04522" />
+        <SolidColorBrush x:Key="AccentDim" Color="#FF8F4E28" />
+        <SolidColorBrush x:Key="AccentSoft" Color="#24C04522" />
+        <SolidColorBrush x:Key="TextMain" Color="#FF26231E" />
+        <SolidColorBrush x:Key="TextSub" Color="#FF6B655A" />
+        <SolidColorBrush x:Key="TextFaint" Color="#FF98917F" />
+        <SolidColorBrush x:Key="Hairline" Color="#16000000" />
+        <SolidColorBrush x:Key="HairlineStrong" Color="#33000000" />
+        <SolidColorBrush x:Key="PanelBg" Color="#F0F7F5EF" />
+        <SolidColorBrush x:Key="PanelBg2" Color="#D9EFE9DC" />
+        <SolidColorBrush x:Key="RowHover" Color="#0A000000" />
+        <SolidColorBrush x:Key="Danger" Color="#FFAD2B2B" />
+
+        <Style x:Key="Mono" TargetType="Control">
+            <Setter Property="FontFamily" Value="Consolas, Cascadia Mono" />
+        </Style>
+    </Application.Resources>
+</Application>

@@ -1,0 +1,34 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TimeDot.Core", "TimeDot.Core\TimeDot.Core.csproj", "{628C93A7-4D64-4BFE-B463-F0DC8E7AD994}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TimeDot", "TimeDot\TimeDot.csproj", "{965B8628-AD88-44AE-905D-9A9B962C6622}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TimeDot.Tests", "TimeDot.Tests\TimeDot.Tests.csproj", "{8F3E29C7-3E3A-4A41-A31F-02BF65AC5C7B}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{628C93A7-4D64-4BFE-B463-F0DC8E7AD994}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{628C93A7-4D64-4BFE-B463-F0DC8E7AD994}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{628C93A7-4D64-4BFE-B463-F0DC8E7AD994}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{628C93A7-4D64-4BFE-B463-F0DC8E7AD994}.Release|Any CPU.Build.0 = Release|Any CPU
+		{965B8628-AD88-44AE-905D-9A9B962C6622}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{965B8628-AD88-44AE-905D-9A9B962C6622}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{965B8628-AD88-44AE-905D-9A9B962C6622}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{965B8628-AD88-44AE-905D-9A9B962C6622}.Release|Any CPU.Build.0 = Release|Any CPU
+		{8F3E29C7-3E3A-4A41-A31F-02BF65AC5C7B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8F3E29C7-3E3A-4A41-A31F-02BF65AC5C7B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8F3E29C7-3E3A-4A41-A31F-02BF65AC5C7B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8F3E29C7-3E3A-4A41-A31F-02BF65AC5C7B}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal
