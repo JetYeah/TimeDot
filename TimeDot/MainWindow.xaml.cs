@@ -96,6 +96,8 @@ public partial class MainWindow : Window
     [DllImport("user32.dll")] private static extern bool DestroyWindow(IntPtr hWnd);
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hWnd, int cmdShow);
     [DllImport("user32.dll")] private static extern bool InvalidateRect(IntPtr hWnd, ref RECT rect, bool erase);
+    [DllImport("user32.dll")] private static extern bool RedrawWindow(IntPtr hWnd, ref RECT rect, IntPtr hrgn, uint flags);
+    private const uint RDW_INVALIDATE = 0x0001, RDW_ERASE = 0x0004, RDW_ALLCHILDREN = 0x0080, RDW_UPDATENOW = 0x0100;
     [DllImport("user32.dll")] private static extern bool UpdateLayeredWindow(IntPtr hWnd, IntPtr hdcDst,
         ref POINT pptDst, ref SIZE psize, IntPtr hdcSrc, ref POINT pptSrc, uint crKey, ref BLENDFUNCTION pblend, uint dwFlags);
     [DllImport("gdi32.dll")] private static extern IntPtr CreateDIBSection(IntPtr hdc, ref BITMAPINFO pbmi,
@@ -393,7 +395,12 @@ public partial class MainWindow : Window
             await Task.Delay(120); // 存活足量合成帧,确保 DWM 合成过它
             DestroyWindow(hwnd); hwnd = IntPtr.Zero; // 销毁触发该区域重合成 → 残影清除
 
-            InvalidateRect(IntPtr.Zero, ref r, true); // 全屏失效补刀(hWnd=null 才是正确语义)
+            // 区域级强制重绘:InvalidateRect(异步,靠消息循环)对部分下层应用的呈现管线无效——
+            // 实证 mstsc 远程桌面在远程画面静止时不重绘被置顶小窗遮挡后显露的区域,球的旧像素
+            // 无限期滞留(驻留型残影,子窗口枚举证实 TimeDot 自身窗口层完全正常)。
+            // RedrawWindow 带 UPDATENOW 同步逼出该区域所有窗口的 WM_PAINT,可清掉这类滞留。
+            RedrawWindow(IntPtr.Zero, ref r, IntPtr.Zero,
+                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
         }
         catch { /* 清残影尽力而为,失败不影响主流程 */ }
         finally

@@ -88,6 +88,28 @@
 - 冷启动 1 秒瞬态残留记录在案,不修(投入产出比极低);
 - 若未来 Runtime 升级后问题回归,先用 `tools/ghost_*.ps1` 复现取证,再做单变量修复。
 
+## 补充(2026-09-07 晚):驻留型残影的真根因与修复
+
+用户持续报告"环形开合后、球右下贴着的小方块残影,驻留型"。经值守监测
+(`tools/ghost_watch.ps1`,异常瞬间自动抓子窗口快照)取证:
+
+1. **残影可见的瞬间,TimeDot 全部子窗口(含 Intermediate D3D Window)矩形完全正常**——
+   残影不在 TimeDot 的任何窗口表面;
+2. 残影恒定 2065px 驻留 28 秒+,期间 TimeDot 窗口层无任何异常;
+3. 复现的必要环境:**球悬浮在 mstsc 远程桌面窗口之上**。本地桌面上无法复现驻留型
+   (只有冷启动首轮 ~1s 的瞬态);
+4. 用户截图特征:球体色(#F2F1EB)残像叠在黑底上。
+
+**结论**:残影物理上滞留在**下层 mstsc 的呈现帧**里——TimeDot 的置顶窗口(环形 236
+或球 84)收起后显露的区域,mstsc 不主动重绘(其呈现管线只在远程画面更新时提交新帧;
+远程画面静止时永不刷新),球的旧像素无限期滞留。历史治理手段全部无效的原因:
+DispelDwmGhost 覆盖窗只强制 DWM 重合成,而 DWM 用的还是 mstsc 的旧帧;
+InvalidateRect 是异步消息,部分应用不响应。
+
+**修复**(已在 dist):`DispelDwmGhost` 收尾的 `InvalidateRect` 升级为
+`RedrawWindow(RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN|RDW_UPDATENOW)`——
+同步逼出该区域所有窗口的 WM_PAINT,强制 mstsc 重绘被显露区域。
+
 ## 相关文件
 
 - 实验日志:`%APPDATA%\TimeDot\ghost.log`(历史,不再增长)
