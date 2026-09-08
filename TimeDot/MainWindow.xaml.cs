@@ -340,34 +340,19 @@ public partial class MainWindow : Window
         catch { /* 窗口句柄未就绪等异常时静默跳过,下次再试 */ }
     }
 
-    /// <summary>收起态布局。shrink=false(默认,收起路径):窗口保持当前矩形不缩——
-    /// 根治驻留型残影:缩窗会在下层(mstsc 远程桌面等)显露曾显示扇区/面板的区域,这类
-    /// 应用的呈现管线不重绘被显露的区域(远程画面静止时永不提交新帧,WM_PAINT/RedrawWindow
-    /// 实证无效),球的旧像素无限期滞留。不缩窗则没有显露区域;大矩形整窗点击穿透
-    /// (SetSelfPass),透明区域不挡下方应用;球按球心用 Margin 定位,视觉零变化。
-    /// shrink=true(仅启动):首次布局,窗口缩为恰好包住球。</summary>
+    /// <summary>收起态布局:窗口缩回恰好包住球(原版行为)。
+    /// 收起保持大矩形的方案已放弃:.NET 8 WPF 非 layered 透明窗的"透明区域"合成不
+    /// 纯净——绿色下层上稳定显现 +3~+13 的提亮方块(取证实证),洗刷(近透明背景强制
+    /// 重绘)只能改变残留色调无法归零;整窗穿透在该 WPF 版本也不可用(layered 被系统
+    /// 拒绝、子类化冻结桌面)。缩窗后透明区域只剩 84 窗口的微小四角,视觉可忽略;
+    /// 下层显露的残影由 DispelDwmGhost 的多时点强制重绘善后。</summary>
     private void LayoutBallOnly(bool shrink = false)
     {
-        if (shrink)
-        {
-            Width = BallSz; Height = BallSz;
-            Left = _cx - BallSz / 2; Top = _cy - BallSz / 2;
-            BallHost.Margin = new Thickness(0);
-            SetScrub(false); // 小球窗恰好被球占满,无需洗刷
-        }
-        else
-        {
-            // 保持矩形,球定位到大窗口中的球心位置
-            BallHost.Margin = new Thickness(_cx - Left - BallSz / 2, _cy - Top - BallSz / 2, 0, 0);
-            // 两段式洗刷:①带近透明背景全窗强制重绘——背景让 WPF 必须真实绘制每个
-            // 像素(含角落),用干净位图冲掉扇区淡出后滞留的旧帧;②切回 Transparent
-            // (真实绘制 alpha=0)再全窗重绘,把①的染色清除——null 不行,"不绘制"会
-            // 保留①的染色像素(实测淡色方形块残留)。
-            SetScrub(true);
-            ForceFullRender();
-            SetScrub(false);
-            ForceFullRender();
-        }
+        var oldRect = new Rect(Left, Top, ActualWidth, ActualHeight);
+        var wasBig = oldRect.Width > BallSz + 8 || oldRect.Height > BallSz + 8;
+        Width = BallSz; Height = BallSz;
+        Left = _cx - BallSz / 2; Top = _cy - BallSz / 2;
+        BallHost.Margin = new Thickness(0);
         BallHost.Visibility = Visibility.Visible;
         BallStandin.Visibility = Visibility.Collapsed; // 替身只在环形菜单期间存在
         PanelHost.Visibility = Visibility.Collapsed;
@@ -375,35 +360,8 @@ public partial class MainWindow : Window
         TodoHost.Visibility = Visibility.Collapsed;
         RadialHost.Visibility = Visibility.Collapsed;
         StripHost.Visibility = Visibility.Collapsed;
-        SetSelfPass(!shrink); // 收起保持大矩形:开整窗穿透;启动小球窗:无需
-    }
-
-    /// <summary>收起态专用"洗刷背景"(alpha=1/255,冻结):非空背景会被 WPF 真实绘制,
-    /// 全窗重渲染时把客户区每个角落(含透明区域)重写为近全透明,冲掉重定向表面里
-    /// 滞留的旧帧像素(方形区域残影的根治手段)。只在收起保持大矩形时常开:展开/环形/
-    /// 吸附态必须关闭——透明区域把这层背景透出来会染成可见方块、盖住下层内容。</summary>
-    private static readonly SolidColorBrush ScrubBrush = NewScrubBrush();
-
-    private static SolidColorBrush NewScrubBrush()
-    {
-        var b = new SolidColorBrush(Color.FromArgb(1, 0, 0, 0));
-        b.Freeze();
-        return b;
-    }
-
-    /// <summary>洗刷背景开关:收起保持大矩形时开(洗角落),其余状态关——注意关的时候用
-    /// Transparent 而非 null:Transparent 会真实绘制 alpha=0 像素(把洗刷染色清除),
-    /// null 是"不绘制",重定向表面保留上一次的染色像素(实测两段式洗刷用 null 时
-    /// 淡色方形块残留在 236 窗口减 84 球的边框区域)。Transparent 参与命中,但窗口
-    /// 矩形本身就拦截点击(WPF 顶层窗按矩形命中),不改变交互现状。</summary>
-    private void SetScrub(bool on) => Root.Background = on ? ScrubBrush : Brushes.Transparent;
-
-    /// <summary>强制 WPF 全窗重渲染并同步等到渲染呈现(缩窗/收起后冲掉表面旧帧)。</summary>
-    private void ForceFullRender()
-    {
-        InvalidateVisual();
-        Root?.InvalidateVisual();
-        Dispatcher.Invoke(() => { }, DispatcherPriority.Render);
+        SetSelfPass(false); // 缩窗后 84 恰是球,无需整窗穿透(球外空气墙由 WebView 圆外穿透负责)
+        if (wasBig) { DispelDwmGhost(oldRect); PostCollapseGuard(oldRect); }
     }
 
     /// <summary>窗口缩小/移走后,被遗弃的屏幕区域可能滞留 DWM 旧帧像素(残影)。
@@ -700,7 +658,6 @@ public partial class MainWindow : Window
     {
         if (_mode != Mode.Free) return; // 吸边态由小条交互负责唤出,展开态不重复展开
         SetSelfPass(false);
-        SetScrub(false); // 展开前关洗刷背景:面板/环形需要真透明
         BallHost.Visibility = Visibility.Visible;
         _mode = Mode.Expanded;
         LayoutExpanded();
@@ -789,7 +746,6 @@ public partial class MainWindow : Window
     {
         if (_mode != Mode.Free) return; // 吸边态由小条交互负责唤出
         SetSelfPass(false);
-        SetScrub(false); // 展开前关洗刷背景
         BallHost.Visibility = Visibility.Visible;
         _mode = Mode.Quick;
         LayoutQuick();
@@ -830,7 +786,6 @@ public partial class MainWindow : Window
     {
         if (_mode != Mode.Free) return;
         SetSelfPass(false);
-        SetScrub(false); // 展开前关洗刷背景
         BallHost.Visibility = Visibility.Visible;
         _mode = Mode.Todo;
         LayoutTodo();
@@ -934,7 +889,6 @@ public partial class MainWindow : Window
     {
         if (_mode != Mode.Free) return;
         SetSelfPass(false);
-        SetScrub(false); // 展开前关洗刷背景,否则扇区点击穿透
         // 真球(WebView2)的方形 HWND 在 Win32 层盖住 WPF 渲染——斜向扇区内缘
         // 会被球光晕方形吃掉。展开期间撤下真球,由替身球无缝顶替中心。
         BallHost.Visibility = Visibility.Collapsed;
@@ -1204,7 +1158,6 @@ public partial class MainWindow : Window
         if (_mode == Mode.Radial) CollapseRadial(false);
         _mode = Mode.Docked;
         SetSelfPass(false); // 上面的收起链可能开了整窗穿透:小条必须可点,先关掉
-        SetScrub(false); // 小条态:关洗刷(背景会盖住小条外区域)
         StopLoops();
         BallHost.Visibility = Visibility.Collapsed;
         StripHost.Visibility = Visibility.Visible;
