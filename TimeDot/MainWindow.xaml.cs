@@ -388,47 +388,57 @@ public partial class MainWindow : Window
 
             await Task.Delay(30); // 稍等缩窗呈现,残影恰在呈现后形成并被覆盖清除
 
-            hwnd = CreateWindowEx(
-                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
-                "STATIC", "", WS_POPUP, r.Left, r.Top, w, h,
-                IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
-            if (hwnd == IntPtr.Zero) return;
-
-            // 供给真实像素:1×1 近透明 PBGRA DIB,经 ULW_ALPHA 拉伸成整个矩形——
-            // 有内容的分层窗口才会被 DWM 真正合成(这是旧实现缺失的关键一步)
-            var bmi = new BITMAPINFO();
-            bmi.bmiHeader.biSize = System.Runtime.InteropServices.Marshal.SizeOf<BITMAPINFOHEADER>();
-            bmi.bmiHeader.biWidth = 1; bmi.bmiHeader.biHeight = -1; // top-down
-            bmi.bmiHeader.biPlanes = 1; bmi.bmiHeader.biBitCount = 32;
-            bmi.bmiHeader.biCompression = BI_RGB;
-            dib = CreateDIBSection(IntPtr.Zero, ref bmi, DIB_RGB_COLORS, out var bits, IntPtr.Zero, 0);
-            if (dib != IntPtr.Zero && bits != IntPtr.Zero)
+            // 单轮覆盖清理:在残影区域盖一个"有真实像素内容"的分层覆盖窗(1×1 近透明
+            // PBGRA DIB 经 ULW 拉伸)→ 存活足量合成帧 → 销毁触发该区域确定性重合成。
+            // 有内容的分层窗口才会被 DWM 真正合成(空 STATIC 窗的清理是空操作)。
+            async Task CoverOnce()
             {
-                // PBGRA 是预乘 alpha 格式:RGB 分量必须 ≤ Alpha,否则 DWM 对其合成行为未定义——
-                // 非法预乘像素正是覆盖清理时灵时不灵的隐患;取合法的近全透明值
-                System.Runtime.InteropServices.Marshal.WriteInt32(bits, 0x01010101); // alpha=1 近透明,肉眼无感
-                memDc = CreateCompatibleDC(IntPtr.Zero);
-                var oldObj = SelectObject(memDc, dib);
-                var dstPt = new POINT { X = r.Left, Y = r.Top };
-                var sz = new SIZE { cx = w, cy = h };
-                var srcPt = new POINT { X = 0, Y = 0 };
-                var blend = new BLENDFUNCTION { BlendOp = 0, BlendFlags = 0, SourceConstantAlpha = 255, AlphaFormat = 1 }; // AC_SRC_OVER + 每像素 alpha
-                UpdateLayeredWindow(hwnd, IntPtr.Zero, ref dstPt, ref sz, memDc, ref srcPt, 0, ref blend, ULW_ALPHA);
-                SelectObject(memDc, oldObj);
+                var hv = CreateWindowEx(
+                    WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                    "STATIC", "", WS_POPUP, r.Left, r.Top, w, h,
+                    IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+                if (hv == IntPtr.Zero) return;
+                var dibv = IntPtr.Zero; var memDcv = IntPtr.Zero;
+                try
+                {
+                    var bmi = new BITMAPINFO();
+                    bmi.bmiHeader.biSize = System.Runtime.InteropServices.Marshal.SizeOf<BITMAPINFOHEADER>();
+                    bmi.bmiHeader.biWidth = 1; bmi.bmiHeader.biHeight = -1; // top-down
+                    bmi.bmiHeader.biPlanes = 1; bmi.bmiHeader.biBitCount = 32;
+                    bmi.bmiHeader.biCompression = BI_RGB;
+                    dibv = CreateDIBSection(IntPtr.Zero, ref bmi, DIB_RGB_COLORS, out var bits, IntPtr.Zero, 0);
+                    if (dibv != IntPtr.Zero && bits != IntPtr.Zero)
+                    {
+                        // PBGRA 预乘格式:RGB ≤ Alpha,取合法近全透明值(非法值合成行为未定义)
+                        System.Runtime.InteropServices.Marshal.WriteInt32(bits, 0x01010101);
+                        memDcv = CreateCompatibleDC(IntPtr.Zero);
+                        var oldObj = SelectObject(memDcv, dibv);
+                        var dstPt = new POINT { X = r.Left, Y = r.Top };
+                        var sz = new SIZE { cx = w, cy = h };
+                        var srcPt = new POINT { X = 0, Y = 0 };
+                        var blend = new BLENDFUNCTION { BlendOp = 0, BlendFlags = 0, SourceConstantAlpha = 255, AlphaFormat = 1 };
+                        UpdateLayeredWindow(hv, IntPtr.Zero, ref dstPt, ref sz, memDcv, ref srcPt, 0, ref blend, ULW_ALPHA);
+                        SelectObject(memDcv, oldObj);
+                    }
+                    ShowWindow(hv, SW_SHOWNOACTIVATE);
+                    await Task.Delay(120); // 存活足量合成帧,确保 DWM 合成过它
+                }
+                finally
+                {
+                    DestroyWindow(hv);
+                    if (memDcv != IntPtr.Zero) DeleteDC(memDcv);
+                    if (dibv != IntPtr.Zero) DeleteObject(dibv);
+                }
             }
-            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            await Task.Delay(120); // 存活足量合成帧,确保 DWM 合成过它
-            DestroyWindow(hwnd); hwnd = IntPtr.Zero; // 销毁触发该区域重合成 → 残影清除
 
-            // 区域级强制重绘(多时点重试 + 定向窗口):残影的实际形成时刻不稳定(Chromium
-            // 最后一帧提交/fade 终帧/D3D 表面收缩各有延迟),单时点清理会扑空(用户实测
-            // "前几次好了,点几次又出现"的间歇性);且对 NULL 全区域的 RedrawWindow 部分
-            // 应用不完整响应。这里在 ~150/450/900ms 三个时点各清一次,并定向对区域
-            // 中心的实际窗口(WindowFromPoint)及其顶层窗口强制重绘——实证 mstsc 远程
-            // 桌面在远程画面静止时永不重绘被显露区域,球的旧像素无限期滞留。
+            // 多时点清理(每时点=覆盖窗+定向强制重绘):残影的实际形成时刻不稳定
+            // (Chromium 最后一帧提交/fade 终帧/D3D 表面收缩各有延迟),单时点清理会
+            // 扑空(实测间歇性);RedrawWindow 单独对部分下层(mstsc 等)无效,必须
+            // 每时点都做覆盖窗重合成。三个时点约 150/570/990ms。
             for (var attempt = 0; attempt < 3; attempt++)
             {
                 if (attempt > 0) await Task.Delay(300);
+                await CoverOnce();
                 var rc = r;
                 RedrawWindow(IntPtr.Zero, ref rc, IntPtr.Zero,
                     RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
