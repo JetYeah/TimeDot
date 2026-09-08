@@ -353,11 +353,17 @@ public partial class MainWindow : Window
             Width = BallSz; Height = BallSz;
             Left = _cx - BallSz / 2; Top = _cy - BallSz / 2;
             BallHost.Margin = new Thickness(0);
+            SetScrub(false); // 小球窗恰好被球占满,无需洗刷
         }
         else
         {
             // 保持矩形,球定位到大窗口中的球心位置
             BallHost.Margin = new Thickness(_cx - Left - BallSz / 2, _cy - Top - BallSz / 2, 0, 0);
+            SetScrub(true); // 收起保持大矩形:开洗刷背景(见 SetScrub 注释)
+            // 全窗重渲染:扇区/面板淡出后,WPF 的重定向表面不会主动重绘"视觉树已空"的
+            // 角落,旧帧像素滞留并透过透明显示——实测"整个方形区域残影、四角明显"。
+            // 强制全窗失效并同步等到渲染呈现,用干净位图冲掉陈旧角落。
+            ForceFullRender();
         }
         BallHost.Visibility = Visibility.Visible;
         BallStandin.Visibility = Visibility.Collapsed; // 替身只在环形菜单期间存在
@@ -367,6 +373,30 @@ public partial class MainWindow : Window
         RadialHost.Visibility = Visibility.Collapsed;
         StripHost.Visibility = Visibility.Collapsed;
         SetSelfPass(!shrink); // 收起保持大矩形:开整窗穿透;启动小球窗:无需
+    }
+
+    /// <summary>收起态专用"洗刷背景"(alpha=1/255,冻结):非空背景会被 WPF 真实绘制,
+    /// 全窗重渲染时把客户区每个角落(含透明区域)重写为近全透明,冲掉重定向表面里
+    /// 滞留的旧帧像素(方形区域残影的根治手段)。只在收起保持大矩形时常开:展开/环形/
+    /// 吸附态必须关闭——透明区域把这层背景透出来会染成可见方块、盖住下层内容。</summary>
+    private static readonly SolidColorBrush ScrubBrush = NewScrubBrush();
+
+    private static SolidColorBrush NewScrubBrush()
+    {
+        var b = new SolidColorBrush(Color.FromArgb(1, 0, 0, 0));
+        b.Freeze();
+        return b;
+    }
+
+    /// <summary>洗刷背景开关:收起保持大矩形时开(洗角落),其余状态关(防透出)。</summary>
+    private void SetScrub(bool on) => Root.Background = on ? ScrubBrush : null;
+
+    /// <summary>强制 WPF 全窗重渲染并同步等到渲染呈现(缩窗/收起后冲掉表面旧帧)。</summary>
+    private void ForceFullRender()
+    {
+        InvalidateVisual();
+        Root?.InvalidateVisual();
+        Dispatcher.Invoke(() => { }, DispatcherPriority.Render);
     }
 
     /// <summary>窗口缩小/移走后,被遗弃的屏幕区域可能滞留 DWM 旧帧像素(残影)。
@@ -662,7 +692,8 @@ public partial class MainWindow : Window
     private void ExpandPanel(bool focusInput = true)
     {
         if (_mode != Mode.Free) return; // 吸边态由小条交互负责唤出,展开态不重复展开
-        SetSelfPass(false); // 收起态主窗整窗穿透中:展开前必须关掉,否则面板点击穿透
+        SetSelfPass(false);
+        SetScrub(false); // 展开前关洗刷背景:面板/环形需要真透明
         BallHost.Visibility = Visibility.Visible;
         _mode = Mode.Expanded;
         LayoutExpanded();
@@ -750,7 +781,8 @@ public partial class MainWindow : Window
     private void ExpandQuick()
     {
         if (_mode != Mode.Free) return; // 吸边态由小条交互负责唤出
-        SetSelfPass(false); // 收起态主窗整窗穿透中:展开前必须关掉
+        SetSelfPass(false);
+        SetScrub(false); // 展开前关洗刷背景
         BallHost.Visibility = Visibility.Visible;
         _mode = Mode.Quick;
         LayoutQuick();
@@ -790,7 +822,8 @@ public partial class MainWindow : Window
     private void ExpandTodo()
     {
         if (_mode != Mode.Free) return;
-        SetSelfPass(false); // 收起态主窗整窗穿透中:展开前必须关掉
+        SetSelfPass(false);
+        SetScrub(false); // 展开前关洗刷背景
         BallHost.Visibility = Visibility.Visible;
         _mode = Mode.Todo;
         LayoutTodo();
@@ -893,7 +926,8 @@ public partial class MainWindow : Window
     private void ExpandRadial()
     {
         if (_mode != Mode.Free) return;
-        SetSelfPass(false); // 收起态主窗整窗穿透中:展开前必须关掉,否则扇区点击穿透
+        SetSelfPass(false);
+        SetScrub(false); // 展开前关洗刷背景,否则扇区点击穿透
         // 真球(WebView2)的方形 HWND 在 Win32 层盖住 WPF 渲染——斜向扇区内缘
         // 会被球光晕方形吃掉。展开期间撤下真球,由替身球无缝顶替中心。
         BallHost.Visibility = Visibility.Collapsed;
@@ -1163,6 +1197,7 @@ public partial class MainWindow : Window
         if (_mode == Mode.Radial) CollapseRadial(false);
         _mode = Mode.Docked;
         SetSelfPass(false); // 上面的收起链可能开了整窗穿透:小条必须可点,先关掉
+        SetScrub(false); // 小条态:关洗刷(背景会盖住小条外区域)
         StopLoops();
         BallHost.Visibility = Visibility.Collapsed;
         StripHost.Visibility = Visibility.Visible;
