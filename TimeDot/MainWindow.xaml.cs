@@ -340,19 +340,25 @@ public partial class MainWindow : Window
         catch { /* 窗口句柄未就绪等异常时静默跳过,下次再试 */ }
     }
 
-    /// <summary>收起态布局:窗口缩回恰好包住球(原版行为)。
-    /// 收起保持大矩形的方案已放弃:.NET 8 WPF 非 layered 透明窗的"透明区域"合成不
-    /// 纯净——绿色下层上稳定显现 +3~+13 的提亮方块(取证实证),洗刷(近透明背景强制
-    /// 重绘)只能改变残留色调无法归零;整窗穿透在该 WPF 版本也不可用(layered 被系统
-    /// 拒绝、子类化冻结桌面)。缩窗后透明区域只剩 84 窗口的微小四角,视觉可忽略;
-    /// 下层显露的残影由 DispelDwmGhost 的多时点强制重绘善后。</summary>
+    /// <summary>收起态布局。shrink=false(默认,收起路径):窗口保持当前矩形不缩——
+    /// 根治驻留型残影:缩窗会在下层(mstsc 远程桌面等)显露曾显示扇区/面板的区域,这类
+    /// 应用的呈现管线不重绘被显露的区域(远程画面静止时永不提交新帧,WM_PAINT/RedrawWindow
+    /// 实证无效),球的旧像素无限期滞留。不缩窗则没有显露区域;大矩形整窗点击穿透
+    /// (SetSelfPass),透明区域不挡下方应用;球按球心用 Margin 定位,视觉零变化。
+    /// shrink=true(仅启动):首次布局,窗口缩为恰好包住球。</summary>
     private void LayoutBallOnly(bool shrink = false)
     {
-        var oldRect = new Rect(Left, Top, ActualWidth, ActualHeight);
-        var wasBig = oldRect.Width > BallSz + 8 || oldRect.Height > BallSz + 8;
-        Width = BallSz; Height = BallSz;
-        Left = _cx - BallSz / 2; Top = _cy - BallSz / 2;
-        BallHost.Margin = new Thickness(0);
+        if (shrink)
+        {
+            Width = BallSz; Height = BallSz;
+            Left = _cx - BallSz / 2; Top = _cy - BallSz / 2;
+            BallHost.Margin = new Thickness(0);
+        }
+        else
+        {
+            // 保持矩形,球定位到大窗口中的球心位置
+            BallHost.Margin = new Thickness(_cx - Left - BallSz / 2, _cy - Top - BallSz / 2, 0, 0);
+        }
         BallHost.Visibility = Visibility.Visible;
         BallStandin.Visibility = Visibility.Collapsed; // 替身只在环形菜单期间存在
         PanelHost.Visibility = Visibility.Collapsed;
@@ -360,8 +366,7 @@ public partial class MainWindow : Window
         TodoHost.Visibility = Visibility.Collapsed;
         RadialHost.Visibility = Visibility.Collapsed;
         StripHost.Visibility = Visibility.Collapsed;
-        SetSelfPass(false); // 缩窗后 84 恰是球,无需整窗穿透(球外空气墙由 WebView 圆外穿透负责)
-        if (wasBig) { DispelDwmGhost(oldRect); PostCollapseGuard(oldRect); }
+        SetSelfPass(!shrink); // 收起保持大矩形:开整窗穿透;启动小球窗:无需
     }
 
     /// <summary>窗口缩小/移走后,被遗弃的屏幕区域可能滞留 DWM 旧帧像素(残影)。
@@ -388,57 +393,47 @@ public partial class MainWindow : Window
 
             await Task.Delay(30); // 稍等缩窗呈现,残影恰在呈现后形成并被覆盖清除
 
-            // 单轮覆盖清理:在残影区域盖一个"有真实像素内容"的分层覆盖窗(1×1 近透明
-            // PBGRA DIB 经 ULW 拉伸)→ 存活足量合成帧 → 销毁触发该区域确定性重合成。
-            // 有内容的分层窗口才会被 DWM 真正合成(空 STATIC 窗的清理是空操作)。
-            async Task CoverOnce()
-            {
-                var hv = CreateWindowEx(
-                    WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
-                    "STATIC", "", WS_POPUP, r.Left, r.Top, w, h,
-                    IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
-                if (hv == IntPtr.Zero) return;
-                var dibv = IntPtr.Zero; var memDcv = IntPtr.Zero;
-                try
-                {
-                    var bmi = new BITMAPINFO();
-                    bmi.bmiHeader.biSize = System.Runtime.InteropServices.Marshal.SizeOf<BITMAPINFOHEADER>();
-                    bmi.bmiHeader.biWidth = 1; bmi.bmiHeader.biHeight = -1; // top-down
-                    bmi.bmiHeader.biPlanes = 1; bmi.bmiHeader.biBitCount = 32;
-                    bmi.bmiHeader.biCompression = BI_RGB;
-                    dibv = CreateDIBSection(IntPtr.Zero, ref bmi, DIB_RGB_COLORS, out var bits, IntPtr.Zero, 0);
-                    if (dibv != IntPtr.Zero && bits != IntPtr.Zero)
-                    {
-                        // PBGRA 预乘格式:RGB ≤ Alpha,取合法近全透明值(非法值合成行为未定义)
-                        System.Runtime.InteropServices.Marshal.WriteInt32(bits, 0x01010101);
-                        memDcv = CreateCompatibleDC(IntPtr.Zero);
-                        var oldObj = SelectObject(memDcv, dibv);
-                        var dstPt = new POINT { X = r.Left, Y = r.Top };
-                        var sz = new SIZE { cx = w, cy = h };
-                        var srcPt = new POINT { X = 0, Y = 0 };
-                        var blend = new BLENDFUNCTION { BlendOp = 0, BlendFlags = 0, SourceConstantAlpha = 255, AlphaFormat = 1 };
-                        UpdateLayeredWindow(hv, IntPtr.Zero, ref dstPt, ref sz, memDcv, ref srcPt, 0, ref blend, ULW_ALPHA);
-                        SelectObject(memDcv, oldObj);
-                    }
-                    ShowWindow(hv, SW_SHOWNOACTIVATE);
-                    await Task.Delay(120); // 存活足量合成帧,确保 DWM 合成过它
-                }
-                finally
-                {
-                    DestroyWindow(hv);
-                    if (memDcv != IntPtr.Zero) DeleteDC(memDcv);
-                    if (dibv != IntPtr.Zero) DeleteObject(dibv);
-                }
-            }
+            hwnd = CreateWindowEx(
+                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                "STATIC", "", WS_POPUP, r.Left, r.Top, w, h,
+                IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            if (hwnd == IntPtr.Zero) return;
 
-            // 多时点清理(每时点=覆盖窗+定向强制重绘):残影的实际形成时刻不稳定
-            // (Chromium 最后一帧提交/fade 终帧/D3D 表面收缩各有延迟),单时点清理会
-            // 扑空(实测间歇性);RedrawWindow 单独对部分下层(mstsc 等)无效,必须
-            // 每时点都做覆盖窗重合成。三个时点约 150/570/990ms。
+            // 供给真实像素:1×1 近透明 PBGRA DIB,经 ULW_ALPHA 拉伸成整个矩形——
+            // 有内容的分层窗口才会被 DWM 真正合成(这是旧实现缺失的关键一步)
+            var bmi = new BITMAPINFO();
+            bmi.bmiHeader.biSize = System.Runtime.InteropServices.Marshal.SizeOf<BITMAPINFOHEADER>();
+            bmi.bmiHeader.biWidth = 1; bmi.bmiHeader.biHeight = -1; // top-down
+            bmi.bmiHeader.biPlanes = 1; bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB;
+            dib = CreateDIBSection(IntPtr.Zero, ref bmi, DIB_RGB_COLORS, out var bits, IntPtr.Zero, 0);
+            if (dib != IntPtr.Zero && bits != IntPtr.Zero)
+            {
+                // PBGRA 是预乘 alpha 格式:RGB 分量必须 ≤ Alpha,否则 DWM 对其合成行为未定义——
+                // 非法预乘像素正是覆盖清理时灵时不灵的隐患;取合法的近全透明值
+                System.Runtime.InteropServices.Marshal.WriteInt32(bits, 0x01010101); // alpha=1 近透明,肉眼无感
+                memDc = CreateCompatibleDC(IntPtr.Zero);
+                var oldObj = SelectObject(memDc, dib);
+                var dstPt = new POINT { X = r.Left, Y = r.Top };
+                var sz = new SIZE { cx = w, cy = h };
+                var srcPt = new POINT { X = 0, Y = 0 };
+                var blend = new BLENDFUNCTION { BlendOp = 0, BlendFlags = 0, SourceConstantAlpha = 255, AlphaFormat = 1 }; // AC_SRC_OVER + 每像素 alpha
+                UpdateLayeredWindow(hwnd, IntPtr.Zero, ref dstPt, ref sz, memDc, ref srcPt, 0, ref blend, ULW_ALPHA);
+                SelectObject(memDc, oldObj);
+            }
+            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            await Task.Delay(120); // 存活足量合成帧,确保 DWM 合成过它
+            DestroyWindow(hwnd); hwnd = IntPtr.Zero; // 销毁触发该区域重合成 → 残影清除
+
+            // 区域级强制重绘(多时点重试 + 定向窗口):残影的实际形成时刻不稳定(Chromium
+            // 最后一帧提交/fade 终帧/D3D 表面收缩各有延迟),单时点清理会扑空(用户实测
+            // "前几次好了,点几次又出现"的间歇性);且对 NULL 全区域的 RedrawWindow 部分
+            // 应用不完整响应。这里在 ~150/450/900ms 三个时点各清一次,并定向对区域
+            // 中心的实际窗口(WindowFromPoint)及其顶层窗口强制重绘——实证 mstsc 远程
+            // 桌面在远程画面静止时永不重绘被显露区域,球的旧像素无限期滞留。
             for (var attempt = 0; attempt < 3; attempt++)
             {
                 if (attempt > 0) await Task.Delay(300);
-                await CoverOnce();
                 var rc = r;
                 RedrawWindow(IntPtr.Zero, ref rc, IntPtr.Zero,
                     RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
@@ -667,7 +662,7 @@ public partial class MainWindow : Window
     private void ExpandPanel(bool focusInput = true)
     {
         if (_mode != Mode.Free) return; // 吸边态由小条交互负责唤出,展开态不重复展开
-        SetSelfPass(false);
+        SetSelfPass(false); // 收起态主窗整窗穿透中:展开前必须关掉,否则面板点击穿透
         BallHost.Visibility = Visibility.Visible;
         _mode = Mode.Expanded;
         LayoutExpanded();
@@ -755,7 +750,7 @@ public partial class MainWindow : Window
     private void ExpandQuick()
     {
         if (_mode != Mode.Free) return; // 吸边态由小条交互负责唤出
-        SetSelfPass(false);
+        SetSelfPass(false); // 收起态主窗整窗穿透中:展开前必须关掉
         BallHost.Visibility = Visibility.Visible;
         _mode = Mode.Quick;
         LayoutQuick();
@@ -795,7 +790,7 @@ public partial class MainWindow : Window
     private void ExpandTodo()
     {
         if (_mode != Mode.Free) return;
-        SetSelfPass(false);
+        SetSelfPass(false); // 收起态主窗整窗穿透中:展开前必须关掉
         BallHost.Visibility = Visibility.Visible;
         _mode = Mode.Todo;
         LayoutTodo();
@@ -898,7 +893,7 @@ public partial class MainWindow : Window
     private void ExpandRadial()
     {
         if (_mode != Mode.Free) return;
-        SetSelfPass(false);
+        SetSelfPass(false); // 收起态主窗整窗穿透中:展开前必须关掉,否则扇区点击穿透
         // 真球(WebView2)的方形 HWND 在 Win32 层盖住 WPF 渲染——斜向扇区内缘
         // 会被球光晕方形吃掉。展开期间撤下真球,由替身球无缝顶替中心。
         BallHost.Visibility = Visibility.Collapsed;
