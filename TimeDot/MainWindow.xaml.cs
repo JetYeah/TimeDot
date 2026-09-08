@@ -360,9 +360,9 @@ public partial class MainWindow : Window
             // 保持矩形,球定位到大窗口中的球心位置
             BallHost.Margin = new Thickness(_cx - Left - BallSz / 2, _cy - Top - BallSz / 2, 0, 0);
             // 两段式洗刷:①带近透明背景全窗强制重绘——背景让 WPF 必须真实绘制每个
-            // 像素(含角落),用干净位图冲掉扇区淡出后滞留的旧帧;②移除背景再全窗重绘,
-            // 角落回到真透明。只做①的话背景会常驻——白底下层上 alpha=1/255 的黑
-            // 染出肉眼可见的淡色方块(实测 #FFFFFF→#FCFEFB,被误认为"方形残影")。
+            // 像素(含角落),用干净位图冲掉扇区淡出后滞留的旧帧;②切回 Transparent
+            // (真实绘制 alpha=0)再全窗重绘,把①的染色清除——null 不行,"不绘制"会
+            // 保留①的染色像素(实测淡色方形块残留)。
             SetScrub(true);
             ForceFullRender();
             SetScrub(false);
@@ -391,8 +391,12 @@ public partial class MainWindow : Window
         return b;
     }
 
-    /// <summary>洗刷背景开关:收起保持大矩形时开(洗角落),其余状态关(防透出)。</summary>
-    private void SetScrub(bool on) => Root.Background = on ? ScrubBrush : null;
+    /// <summary>洗刷背景开关:收起保持大矩形时开(洗角落),其余状态关——注意关的时候用
+    /// Transparent 而非 null:Transparent 会真实绘制 alpha=0 像素(把洗刷染色清除),
+    /// null 是"不绘制",重定向表面保留上一次的染色像素(实测两段式洗刷用 null 时
+    /// 淡色方形块残留在 236 窗口减 84 球的边框区域)。Transparent 参与命中,但窗口
+    /// 矩形本身就拦截点击(WPF 顶层窗按矩形命中),不改变交互现状。</summary>
+    private void SetScrub(bool on) => Root.Background = on ? ScrubBrush : Brushes.Transparent;
 
     /// <summary>强制 WPF 全窗重渲染并同步等到渲染呈现(缩窗/收起后冲掉表面旧帧)。</summary>
     private void ForceFullRender()
