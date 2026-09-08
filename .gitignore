@@ -23,3 +23,5 @@ ui_phase1.txt
 ui_verify.txt
 
 tools/ghost-shots/
+
+tools/.gh_token
