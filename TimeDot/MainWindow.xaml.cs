@@ -206,6 +206,22 @@ public partial class MainWindow : Window
         {
             if (_mode == Mode.Radial) CollapseRadial(true);
         };
+        // 展开态点击窗口空白(内容外) = 收起:恒定窗口方案下整个工作区都是本窗,
+        // 展开态不穿透,空白点击会被吞且不触发 Deactivated(点的是自己)——没有这条
+        // 用户会被困住(点不动下层,只能点球收起)。Transparent 让 Root 参与命中,
+        // OriginalSource==Root 即内容外空白;Free 态整窗在 Win32 层穿透,不会进来。
+        Root.Background = Brushes.Transparent;
+        Root.MouseLeftButtonDown += (_, e) =>
+        {
+            if (e.OriginalSource != Root) return; // 内容内点击走各自的处理器
+            switch (_mode)
+            {
+                case Mode.Expanded: if (!_panelPinned) CollapsePanel(true); break;
+                case Mode.Quick: if (!_quickPinned) CollapseQuick(true); break;
+                case Mode.Todo: if (!_todoPinned) CollapseTodo(true); break;
+                case Mode.Radial: CollapseRadial(true); break;
+            }
+        };
         Deactivated += (_, _) =>
         {
             if (_mode == Mode.Expanded && !_panelPinned) CollapsePanel(true);
@@ -267,6 +283,13 @@ public partial class MainWindow : Window
         var wa0 = SystemParameters.WorkArea;
         Left = wa0.Left; Top = wa0.Top;
         Width = wa0.Width; Height = wa0.Height;
+
+        // 恒定窗口的穿透实现:窗口过程子类化。WS_EX_LAYERED+TRANSPARENT 组合在 .NET 8
+        // 的 WPF 窗口上被系统拒绝(实测 EXSTYLE 设不上 0x80000),HwndSource.AddHook 也
+        // 收不到 WM_NCHITTEST——改为经典 SetWindowLongPtr 子类化,在命中测试层动手:
+        // Free 态对球区域之外的点返回 HTTRANSPARENT,系统把点击交给 z 序下方窗口
+        // (下层应用);球区域内走原过程(HTCLIENT→WebView 子窗接收)。
+        InstallPassSubclass();
 
         if (cfg.DockSide is "left" or "right" or "top" or "bottom")
         {
@@ -335,22 +358,69 @@ public partial class MainWindow : Window
 
     private Rect WorkArea => SystemParameters.WorkArea;
 
-    /// <summary>主窗整窗点击穿透开关:收起态窗口保持展开矩形(不缩窗)时,大矩形的透明
-    /// 区域必须穿透才不挡下方应用。WS_EX_TRANSPARENT 只让"主窗自身"对鼠标透明——
-    /// 它的子窗口(WebView 球)仍正常参与命中,球照常可点。展开任何界面前必须先关穿透。</summary>
+    /// <summary>主窗整窗点击穿透开关。关键认知(两层):
+    /// 1) .NET 8 的 WPF 透明窗口走 DWM 呈现路径,不再自带 WS_EX_LAYERED——而
+    ///    WS_EX_TRANSPARENT 的完全穿透只在 layered 窗口上成立,需手动补 LAYERED +
+    ///    SetLayeredWindowAttributes(alpha=255,与 per-pixel alpha 相乘,视觉无损);
+    /// 2) WPF 的 HwndSource 在布局/激活同步时会重写窗口样式,外部设置会被抹掉——
+    ///    所以不信任缓存状态,UpdateWebPass 的 40ms 轮询以 GetWindowLong 实测位纠偏。
+    /// 展开态(面板要点击)关闭穿透,透明像素之外的区域由"点空白收起"兜底。</summary>
     private bool _selfPass;
     private void SetSelfPass(bool on)
     {
-        if (_selfPass == on) return;
+        // 穿透已改由 PassHitTestHook(WM_NCHITTEST 返回 HTTRANSPARENT)实现——
+        // WS_EX_LAYERED 路线在 .NET 8 WPF 窗口上被系统拒绝(实测样式位设不上),
+        // 本方法退役为状态记录,调用点保留以维持模式语义。
+        _selfPass = on;
+    }
+
+    // ---------- 恒定窗口的命中穿透:窗口过程子类化(WM_NCHITTEST → HTTRANSPARENT) ----------
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate IntPtr WndProcDelegate(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
+    private static extern IntPtr SetWindowLongPtr64(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+    [DllImport("user32.dll")]
+    private static extern IntPtr CallWindowProc(IntPtr lpPrevWndFunc, IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+    private const int GWL_WNDPROC = -4;
+    private IntPtr _origWndProc;
+    private WndProcDelegate? _passProc; // 持引用防委托被 GC
+
+    private void InstallPassSubclass()
+    {
         try
         {
-            var self = new System.Windows.Interop.WindowInteropHelper(this).Handle;
-            if (self == IntPtr.Zero) return;
-            int ex = GetWindowLong(self, GWL_EXSTYLE);
-            SetWindowLong(self, GWL_EXSTYLE, on ? ex | WS_EX_TRANSPARENT : ex & ~WS_EX_TRANSPARENT);
-            _selfPass = on;
+            var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+            if (hwnd == IntPtr.Zero) return;
+            _passProc = PassWndProc;
+            _origWndProc = SetWindowLongPtr64(hwnd, GWL_WNDPROC,
+                System.Runtime.InteropServices.Marshal.GetFunctionPointerForDelegate(_passProc));
         }
-        catch { /* 窗口句柄未就绪等异常时静默跳过,下次再试 */ }
+        catch { /* 子类化失败时退化为无穿透(点击空气墙),不影响其余功能 */ }
+    }
+
+    /// <summary>Free 态球外区域 HTTRANSPARENT:点击交给 z 序下方窗口;球区域走原过程。</summary>
+    private IntPtr PassWndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
+    {
+        const uint WM_NCHITTEST = 0x0084;
+        if (msg == WM_NCHITTEST && _origWndProc != IntPtr.Zero)
+        {
+            var l = lParam.ToInt64();
+            var x = (short)(l & 0xFFFF);
+            var y = (short)((l >> 16) & 0xFFFF);
+            var d = _dpiScale;
+            bool hit;
+            if (_mode == Mode.Free)
+                hit = Math.Abs(x - _cx * d) <= 48 * d && Math.Abs(y - _cy * d) <= 48 * d; // 球(含余量)
+            else if (_mode == Mode.Docked)
+            {
+                // 吸附态:命中区=小条矩形(外扩 6px 便于点击),其余穿透——否则全屏空气墙
+                var r = DockedTarget();
+                hit = x >= (r.Left - 6) * d && x <= (r.Right + 6) * d && y >= (r.Top - 6) * d && y <= (r.Bottom + 6) * d;
+            }
+            else hit = true; // 展开/环形态:内容需要点击,整窗接收(点空白由"点空白收起"兜底)
+            if (!hit) return new IntPtr(-1); // HTTRANSPARENT:点击交给 z 序下方窗口
+        }
+        return CallWindowProc(_origWndProc, hWnd, msg, wParam, lParam);
     }
 
     /// <summary>收起态布局(窗口恒为工作区大小,永不缩/移):球按球心用 Margin 定位。
@@ -1498,9 +1568,8 @@ public partial class MainWindow : Window
     {
         try
         {
-            // 整窗穿透一致性纠偏(40ms 轮询兜底):收起保持大矩形(Free 且窗口大于球)必须
-            // 穿透;其他任何态不允许——状态转换遗漏时在这里自动纠正
-            var wantSelf = _mode == Mode.Free && (ActualWidth > BallSz + 8 || ActualHeight > BallSz + 8);
+            // 穿透已由 PassHitTestHook(WM_NCHITTEST)承担,这里只保留意图状态记录
+            var wantSelf = _mode == Mode.Free;
             if (wantSelf != _selfPass) SetSelfPass(wantSelf);
 
             var h = BallWeb.Handle;
