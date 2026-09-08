@@ -359,10 +359,13 @@ public partial class MainWindow : Window
         {
             // 保持矩形,球定位到大窗口中的球心位置
             BallHost.Margin = new Thickness(_cx - Left - BallSz / 2, _cy - Top - BallSz / 2, 0, 0);
-            SetScrub(true); // 收起保持大矩形:开洗刷背景(见 SetScrub 注释)
-            // 全窗重渲染:扇区/面板淡出后,WPF 的重定向表面不会主动重绘"视觉树已空"的
-            // 角落,旧帧像素滞留并透过透明显示——实测"整个方形区域残影、四角明显"。
-            // 强制全窗失效并同步等到渲染呈现,用干净位图冲掉陈旧角落。
+            // 两段式洗刷:①带近透明背景全窗强制重绘——背景让 WPF 必须真实绘制每个
+            // 像素(含角落),用干净位图冲掉扇区淡出后滞留的旧帧;②移除背景再全窗重绘,
+            // 角落回到真透明。只做①的话背景会常驻——白底下层上 alpha=1/255 的黑
+            // 染出肉眼可见的淡色方块(实测 #FFFFFF→#FCFEFB,被误认为"方形残影")。
+            SetScrub(true);
+            ForceFullRender();
+            SetScrub(false);
             ForceFullRender();
         }
         BallHost.Visibility = Visibility.Visible;
