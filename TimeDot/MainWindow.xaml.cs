@@ -97,6 +97,8 @@ public partial class MainWindow : Window
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hWnd, int cmdShow);
     [DllImport("user32.dll")] private static extern bool InvalidateRect(IntPtr hWnd, ref RECT rect, bool erase);
     [DllImport("user32.dll")] private static extern bool RedrawWindow(IntPtr hWnd, ref RECT rect, IntPtr hrgn, uint flags);
+    [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr hWnd, uint flags);
     private const uint RDW_INVALIDATE = 0x0001, RDW_ERASE = 0x0004, RDW_ALLCHILDREN = 0x0080, RDW_UPDATENOW = 0x0100;
     [DllImport("user32.dll")] private static extern bool UpdateLayeredWindow(IntPtr hWnd, IntPtr hdcDst,
         ref POINT pptDst, ref SIZE psize, IntPtr hdcSrc, ref POINT pptSrc, uint crKey, ref BLENDFUNCTION pblend, uint dwFlags);
@@ -262,7 +264,7 @@ public partial class MainWindow : Window
         }
         else
         {
-            LayoutBallOnly();
+            LayoutBallOnly(shrink: true); // 启动首布局:窗口缩为球大小
             StartLoops();
         }
 
@@ -320,15 +322,43 @@ public partial class MainWindow : Window
 
     private Rect WorkArea => SystemParameters.WorkArea;
 
-    /// <summary>自由态:窗口恰好包住球。</summary>
-    private void LayoutBallOnly()
+    /// <summary>主窗整窗点击穿透开关:收起态窗口保持展开矩形(不缩窗)时,大矩形的透明
+    /// 区域必须穿透才不挡下方应用。WS_EX_TRANSPARENT 只让"主窗自身"对鼠标透明——
+    /// 它的子窗口(WebView 球)仍正常参与命中,球照常可点。展开任何界面前必须先关穿透。</summary>
+    private bool _selfPass;
+    private void SetSelfPass(bool on)
     {
-        // 从大窗口缩回球尺寸时 DWM 偶发把含旧内容的帧滞留在窗口外区域(残影)
-        var oldRect = new Rect(Left, Top, ActualWidth, ActualHeight);
-        var wasBig = oldRect.Width > BallSz + 8 || oldRect.Height > BallSz + 8;
-        Width = BallSz; Height = BallSz;
-        Left = _cx - BallSz / 2; Top = _cy - BallSz / 2;
-        BallHost.Margin = new Thickness(0);
+        if (_selfPass == on) return;
+        try
+        {
+            var self = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+            if (self == IntPtr.Zero) return;
+            int ex = GetWindowLong(self, GWL_EXSTYLE);
+            SetWindowLong(self, GWL_EXSTYLE, on ? ex | WS_EX_TRANSPARENT : ex & ~WS_EX_TRANSPARENT);
+            _selfPass = on;
+        }
+        catch { /* 窗口句柄未就绪等异常时静默跳过,下次再试 */ }
+    }
+
+    /// <summary>收起态布局。shrink=false(默认,收起路径):窗口保持当前矩形不缩——
+    /// 根治驻留型残影:缩窗会在下层(mstsc 远程桌面等)显露曾显示扇区/面板的区域,这类
+    /// 应用的呈现管线不重绘被显露的区域(远程画面静止时永不提交新帧,WM_PAINT/RedrawWindow
+    /// 实证无效),球的旧像素无限期滞留。不缩窗则没有显露区域;大矩形整窗点击穿透
+    /// (SetSelfPass),透明区域不挡下方应用;球按球心用 Margin 定位,视觉零变化。
+    /// shrink=true(仅启动):首次布局,窗口缩为恰好包住球。</summary>
+    private void LayoutBallOnly(bool shrink = false)
+    {
+        if (shrink)
+        {
+            Width = BallSz; Height = BallSz;
+            Left = _cx - BallSz / 2; Top = _cy - BallSz / 2;
+            BallHost.Margin = new Thickness(0);
+        }
+        else
+        {
+            // 保持矩形,球定位到大窗口中的球心位置
+            BallHost.Margin = new Thickness(_cx - Left - BallSz / 2, _cy - Top - BallSz / 2, 0, 0);
+        }
         BallHost.Visibility = Visibility.Visible;
         BallStandin.Visibility = Visibility.Collapsed; // 替身只在环形菜单期间存在
         PanelHost.Visibility = Visibility.Collapsed;
@@ -336,7 +366,7 @@ public partial class MainWindow : Window
         TodoHost.Visibility = Visibility.Collapsed;
         RadialHost.Visibility = Visibility.Collapsed;
         StripHost.Visibility = Visibility.Collapsed;
-        if (wasBig) { DispelDwmGhost(oldRect); PostCollapseGuard(oldRect); }
+        SetSelfPass(!shrink); // 收起保持大矩形:开整窗穿透;启动小球窗:无需
     }
 
     /// <summary>窗口缩小/移走后,被遗弃的屏幕区域可能滞留 DWM 旧帧像素(残影)。
@@ -395,12 +425,30 @@ public partial class MainWindow : Window
             await Task.Delay(120); // 存活足量合成帧,确保 DWM 合成过它
             DestroyWindow(hwnd); hwnd = IntPtr.Zero; // 销毁触发该区域重合成 → 残影清除
 
-            // 区域级强制重绘:InvalidateRect(异步,靠消息循环)对部分下层应用的呈现管线无效——
-            // 实证 mstsc 远程桌面在远程画面静止时不重绘被置顶小窗遮挡后显露的区域,球的旧像素
-            // 无限期滞留(驻留型残影,子窗口枚举证实 TimeDot 自身窗口层完全正常)。
-            // RedrawWindow 带 UPDATENOW 同步逼出该区域所有窗口的 WM_PAINT,可清掉这类滞留。
-            RedrawWindow(IntPtr.Zero, ref r, IntPtr.Zero,
-                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+            // 区域级强制重绘(多时点重试 + 定向窗口):残影的实际形成时刻不稳定(Chromium
+            // 最后一帧提交/fade 终帧/D3D 表面收缩各有延迟),单时点清理会扑空(用户实测
+            // "前几次好了,点几次又出现"的间歇性);且对 NULL 全区域的 RedrawWindow 部分
+            // 应用不完整响应。这里在 ~150/450/900ms 三个时点各清一次,并定向对区域
+            // 中心的实际窗口(WindowFromPoint)及其顶层窗口强制重绘——实证 mstsc 远程
+            // 桌面在远程画面静止时永不重绘被显露区域,球的旧像素无限期滞留。
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                if (attempt > 0) await Task.Delay(300);
+                var rc = r;
+                RedrawWindow(IntPtr.Zero, ref rc, IntPtr.Zero,
+                    RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+                var mid = new POINT { X = (rc.Left + rc.Right) / 2, Y = (rc.Top + rc.Bottom) / 2 };
+                var hit = WindowFromPoint(mid);
+                if (hit != IntPtr.Zero)
+                {
+                    RedrawWindow(hit, ref rc, IntPtr.Zero,
+                        RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+                    var root = GetAncestor(hit, 2 /* GA_ROOT */);
+                    if (root != IntPtr.Zero && root != hit)
+                        RedrawWindow(root, ref rc, IntPtr.Zero,
+                            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+                }
+            }
         }
         catch { /* 清残影尽力而为,失败不影响主流程 */ }
         finally
@@ -614,6 +662,7 @@ public partial class MainWindow : Window
     private void ExpandPanel(bool focusInput = true)
     {
         if (_mode != Mode.Free) return; // 吸边态由小条交互负责唤出,展开态不重复展开
+        SetSelfPass(false); // 收起态主窗整窗穿透中:展开前必须关掉,否则面板点击穿透
         BallHost.Visibility = Visibility.Visible;
         _mode = Mode.Expanded;
         LayoutExpanded();
@@ -701,6 +750,7 @@ public partial class MainWindow : Window
     private void ExpandQuick()
     {
         if (_mode != Mode.Free) return; // 吸边态由小条交互负责唤出
+        SetSelfPass(false); // 收起态主窗整窗穿透中:展开前必须关掉
         BallHost.Visibility = Visibility.Visible;
         _mode = Mode.Quick;
         LayoutQuick();
@@ -740,6 +790,7 @@ public partial class MainWindow : Window
     private void ExpandTodo()
     {
         if (_mode != Mode.Free) return;
+        SetSelfPass(false); // 收起态主窗整窗穿透中:展开前必须关掉
         BallHost.Visibility = Visibility.Visible;
         _mode = Mode.Todo;
         LayoutTodo();
@@ -842,6 +893,7 @@ public partial class MainWindow : Window
     private void ExpandRadial()
     {
         if (_mode != Mode.Free) return;
+        SetSelfPass(false); // 收起态主窗整窗穿透中:展开前必须关掉,否则扇区点击穿透
         // 真球(WebView2)的方形 HWND 在 Win32 层盖住 WPF 渲染——斜向扇区内缘
         // 会被球光晕方形吃掉。展开期间撤下真球,由替身球无缝顶替中心。
         BallHost.Visibility = Visibility.Collapsed;
@@ -1110,6 +1162,7 @@ public partial class MainWindow : Window
         if (_mode == Mode.Todo) CollapseTodo(false);
         if (_mode == Mode.Radial) CollapseRadial(false);
         _mode = Mode.Docked;
+        SetSelfPass(false); // 上面的收起链可能开了整窗穿透:小条必须可点,先关掉
         StopLoops();
         BallHost.Visibility = Visibility.Collapsed;
         StripHost.Visibility = Visibility.Visible;
@@ -1144,7 +1197,8 @@ public partial class MainWindow : Window
         BallHost.Visibility = Visibility.Visible;
         var target = new Rect(_cx - BallSz / 2, _cy - BallSz / 2, BallSz, BallSz);
         if (animate) { BallHost.Margin = new Thickness(0); AnimateWindowTo(target, 190); }
-        else LayoutBallOnly();
+        else LayoutBallOnly(shrink: true); // 唤出即回到小球窗
+        SetSelfPass(false); // 吸附期间穿透可能被误开:球窗由 WebView 圆外穿透负责即可
         StartLoops();
         SavePosition();
     }
@@ -1182,7 +1236,19 @@ public partial class MainWindow : Window
     {
         var sec = _store.Config.AutoDockSeconds;
         if (sec <= 0 || _mode != Mode.Free) return;
-        if (IsMouseOver) { _lastActivity = DateTime.Now; return; }
+        // 整窗穿透态下 WPF IsMouseOver 恒为 false(鼠标被 Win32 层穿透了),须用光标
+        // 物理坐标判定"鼠标在球窗内"——否则悬停球上不动 60 秒会被误判空闲而吸边
+        var over = IsMouseOver;
+        if (!over && _selfPass)
+        {
+            var self = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+            if (self != IntPtr.Zero && GetWindowRect(self, out var sr))
+            {
+                GetCursorPos(out var cp);
+                over = cp.X >= sr.Left && cp.X < sr.Right && cp.Y >= sr.Top && cp.Y < sr.Bottom;
+            }
+        }
+        if (over) { _lastActivity = DateTime.Now; return; }
         if ((DateTime.Now - _lastActivity).TotalSeconds < sec) return;
         _dockSide = NearestSide();
         _dockOffset = _dockSide is Side.Left or Side.Right ? _cy : _cx;
@@ -1502,6 +1568,11 @@ public partial class MainWindow : Window
     {
         try
         {
+            // 整窗穿透一致性纠偏(40ms 轮询兜底):收起保持大矩形(Free 且窗口大于球)必须
+            // 穿透;其他任何态不允许——状态转换遗漏时在这里自动纠正
+            var wantSelf = _mode == Mode.Free && (ActualWidth > BallSz + 8 || ActualHeight > BallSz + 8);
+            if (wantSelf != _selfPass) SetSelfPass(wantSelf);
+
             var h = BallWeb.Handle;
             if (h == IntPtr.Zero) return;
             var want = false;
