@@ -469,32 +469,58 @@ public partial class MainWindow
     private static string TrimFor(string s, int max) =>
         s.Length <= max ? s : s[..max] + "…";
 
-    // ---------- 待办(环形菜单唤出) ----------
+    // ---------- 待办(环形菜单唤出;先后依赖思想吸收自 NextTodo) ----------
 
-    /// <summary>与 TodoStore 就地同步展示副本(排序:未完成在前),随后套用当前筛选。</summary>
+    /// <summary>连线模式源:非空时点击另一条待办=把它设为源的前置(已有则拆除)。Esc/再点链接钮取消。</summary>
+    private TodoVm? _todoLinkSource;
+    /// <summary>最近一次删除快照,供 Ctrl+Z 撤销(NextTodo:每次改动都可撤销)。</summary>
+    private TodoRemovalSnapshot? _lastRemovedTodo;
+
+    /// <summary>由 Store 条目构造展示项:派生状态(可做/等待/解锁数)在这里算,
+    /// 等待项附带"在等谁"的前置文本(最多 2 个,NextTodo 等待中可视化)。</summary>
+    private static TodoVm MakeTodoVm(TodoItem t, IReadOnlyList<TodoItem> all)
+    {
+        var blockers = TodoStore.OpenBlockerTexts(t, all);
+        var waiting = !t.Done && blockers.Count > 0;
+        var hint = blockers.Count == 0 ? ""
+            : "：" + string.Join("、", blockers.Select(b => b.Length <= 14 ? b : b[..14] + "…").Take(2))
+                   + (blockers.Count > 2 ? "…" : "");
+        return new TodoVm(t.Id, t.Text, t.Done, waiting, blockers.Count,
+            hint, TodoStore.UnlockCount(t.Id, all), t.Created);
+    }
+
+    /// <summary>与 TodoStore 就地同步展示副本(排序:可做在前、等待在后,已完成尾),随后套用当前筛选。</summary>
     private void RefreshTodoList()
     {
         var src = _todo.Items;
+        var all = _todo.RawItems;
         for (var i = _todoVms.Count - 1; i >= 0; i--)
             if (src.All(t => t.Id != _todoVms[i].Id)) _todoVms.RemoveAt(i);
         for (var i = 0; i < src.Count; i++)
         {
+            var fresh = MakeTodoVm(src[i], all);
             var existing = _todoVms.FirstOrDefault(v => v.Id == src[i].Id);
-            if (existing == null) _todoVms.Insert(i, new TodoVm(src[i].Id, src[i].Text, src[i].Done, src[i].Created));
+            if (existing == null) _todoVms.Insert(i, fresh);
             else
             {
                 var cur = _todoVms.IndexOf(existing);
                 if (cur != i) { _todoVms.Move(cur, i); cur = i; }
-                // 完成状态/文本变化:就地替换以刷新模板触发器(VM 只读)——Move 分支同样
-                // 要查:勾选/重新打开的条目必然移位,只 Move 不替换会永远显示旧状态
-                if (_todoVms[cur].Done != src[i].Done || _todoVms[cur].Text != src[i].Text)
-                    _todoVms[cur] = new TodoVm(src[i].Id, src[i].Text, src[i].Done, src[i].Created);
+                // 完成状态/文本/等待中任一变化:就地替换刷新模板触发器与副文本
+                // (VM 只读,勾选/重新打开必然移位,只 Move 不替换会永远显示旧状态)
+                if (_todoVms[cur].Done != fresh.Done || _todoVms[cur].Text != fresh.Text
+                    || _todoVms[cur].IsWaiting != fresh.IsWaiting || _todoVms[cur].MetaText != fresh.MetaText)
+                    _todoVms[cur] = fresh;
             }
         }
         TodoList.ItemsSource = _todoVms;
         ApplyTodoFilter();
         var open = src.Count(t => !t.Done);
-        TodoCount.Text = open == 0 && src.Count > 0 ? "全部完成 ✓" : $"{open} 项待办";
+        var waiting = src.Count(t => !t.Done && !TodoStore.IsReady(t, all));
+        // 连线模式优先占位头部计数,给用户明确的模式反馈
+        if (_todoLinkSource != null)
+            TodoCount.Text = "连线中:点另一条设为它的前置 · Esc 取消";
+        else if (waiting > 0) TodoCount.Text = $"{open - waiting} 项可做 · {waiting} 项等待";
+        else TodoCount.Text = open == 0 && src.Count > 0 ? "全部完成 ✓" : $"{open} 项待办";
         // 面板开着时新增/删除/勾选 → 窗口高度跟随内容重排,避免条目被窗口底边裁掉
         // (筛选切换不重排:窗口尺寸稳定,列表区保持原尺寸出滚动条)
         if (_mode == Mode.Todo) LayoutTodo();
@@ -512,10 +538,14 @@ public partial class MainWindow
     private void ApplyTodoFilter()
     {
         var view = CollectionViewSource.GetDefaultView(_todoVms);
+        // Store 已按可做→等待→完成排序,分组只建一次;刷新时条目会随依赖/完成状态自动换组。
+        if (view.GroupDescriptions.Count == 0)
+            view.GroupDescriptions.Add(new PropertyGroupDescription(nameof(TodoVm.Section)));
         view.Filter = _todoFilter switch
         {
             "Today" => o => o is TodoVm v && CreatedOn(v.Created) == DateTime.Today,
             "Week"  => o => o is TodoVm v && InThisWeek(v.Created),
+            "Ready" => o => o is TodoVm v && !v.Done && !v.IsWaiting, // NextTodo"接下来":只看现在能做的
             "Open"  => o => o is TodoVm v && !v.Done,
             "Done"  => o => o is TodoVm v && v.Done,
             _ => null,
@@ -546,29 +576,82 @@ public partial class MainWindow
 
     private void TodoInputKeyDown(object sender, KeyEventArgs e)
     {
-        if (e.Key == Key.Enter) { AddTodo(); e.Handled = true; }
+        // Shift+Enter 换行:配合回车时按行拆分批量入库(NextTodo"一段话拆多条"的输入面)
+        if (e.Key == Key.Enter && Keyboard.Modifiers == ModifierKeys.Shift)
+        {
+            var tb = TodoInput;
+            var caret = tb.CaretIndex;
+            tb.Text = tb.Text.Insert(caret, "\n");
+            tb.CaretIndex = caret + 1;
+            e.Handled = true;
+            return;
+        }
+        if (e.Key == Key.Enter) { AddTodo(); e.Handled = true; return; }
+        if (e.Key == Key.Escape && _todoLinkSource != null)
+        {
+            CancelTodoLink(); e.Handled = true; return;
+        }
+        // Ctrl+Z 撤销最近一次删除(NextTodo:改动都有记录可撤销)
+        if (e.Key == Key.Z && Keyboard.Modifiers == ModifierKeys.Control && _lastRemovedTodo != null)
+        {
+            if (_todo.Restore(_lastRemovedTodo) != null)
+            {
+                _lastRemovedTodo = null;
+                RefreshTodoList();
+                SendEmotion("30");
+            }
+            e.Handled = true;
+        }
     }
 
     private void AddTodo()
     {
-        var text = TodoInput.Text.Trim();
-        if (text.Length == 0)
+        var text = TodoInput.Text;
+        if (text.Trim().Length == 0)
         {
             // 空输入:轻闪提示,不入库
             var a = new DoubleAnimation(1, 0.4, TimeSpan.FromMilliseconds(150)) { AutoReverse = true };
             TodoInput.BeginAnimation(OpacityProperty, a);
             return;
         }
-        _todo.Add(text);
+        // 多行文本按行拆分(NextTodo "一段话拆成多条待办"的本地轻量版):
+        // 粘贴一整段清单 = 一行一条入库,空行自动跳过
+        var lines = text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        if (_todo.AddMany(lines) == 0)
+        {
+            var a = new DoubleAnimation(1, 0.4, TimeSpan.FromMilliseconds(150)) { AutoReverse = true };
+            TodoInput.BeginAnimation(OpacityProperty, a);
+            return;
+        }
         TodoInput.Clear();
         RefreshTodoList();
         Keyboard.Focus(TodoInput);
     }
 
-    /// <summary>整行点击:翻转完成状态(完成后置尾,已完成的重新打开归位)。</summary>
+    /// <summary>整行点击:翻转完成状态(完成后置尾,已完成的重新打开归位)。
+    /// 连线模式中:点另一条=设为源的前置(已有则拆除),点自己=取消,不翻转状态。</summary>
     private void TodoToggleClick(object sender, RoutedEventArgs e)
     {
         if (sender is not FrameworkElement fe || fe.Tag is not TodoVm vm) return;
+        if (_todoLinkSource != null)
+        {
+            if (vm.Id == _todoLinkSource.Id) { CancelTodoLink(); return; }
+            var src = _todoLinkSource;
+            var dependent = _todo.RawItems.FirstOrDefault(t => t.Id == src.Id);
+            if (dependent == null) { CancelTodoLink(); return; }
+            if (dependent.BlockedBy.Contains(vm.Id))
+            {
+                // 已存在该依赖:再点一次拆除(toggle 语义,给拆除一个入口)
+                _todo.ClearDependency(vm.Id, src.Id);
+                RefreshTodoList();
+            }
+            else if (_todo.SetDependency(vm.Id, src.Id))
+            {
+                CancelTodoLink(); // 成功后退出模式,失败(成环)则保留模式重选
+                RefreshTodoList();
+            }
+            return;
+        }
         if (_todo.Toggle(vm.Id))
         {
             RefreshTodoList();
@@ -576,10 +659,158 @@ public partial class MainWindow
         }
     }
 
+    /// <summary>链接钮:进入/退出连线模式。语义:给本条待办选一个前置(它完成后才能做本条)。</summary>
+    private void TodoLinkClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement fe || fe.Tag is not TodoVm vm) return;
+        if (_todoLinkSource?.Id == vm.Id) { CancelTodoLink(); return; }
+        _todoLinkSource = vm;
+        RefreshTodoList(); // 刷新头部提示文案
+    }
+
+    /// <summary>退出连线模式并刷新头部文案。</summary>
+    private void CancelTodoLink()
+    {
+        _todoLinkSource = null;
+        RefreshTodoList();
+    }
+
     private void TodoRemoveClick(object sender, RoutedEventArgs e)
     {
         if (sender is not FrameworkElement fe || fe.Tag is not TodoVm vm) return;
-        if (_todo.Remove(vm.Id)) RefreshTodoList();
+        var snap = _todo.RemoveWithUndo(vm.Id, out _);
+        if (snap != null)
+        {
+            _lastRemovedTodo = snap; // 存快照,Ctrl+Z 可恢复(含双向依赖)
+            if (_todoLinkSource?.Id == vm.Id) _todoLinkSource = null; // 源被删,退出连线模式
+            RefreshTodoList();
+            TodoCount.Text = "已删除 · Ctrl+Z 撤销";
+            Keyboard.Focus(TodoInput); // 焦点归位输入框,让 Ctrl+Z 能被接住
+        }
+    }
+
+    // ---------- 白盒自测(--todo-uitest 启动参数触发) ----------
+
+    /// <summary>走真实 UI 路径(与用户点击同一批 handler)自测待办依赖功能,
+    /// 断言 VM 派生状态与面板文案,结果写 uitest_result.txt。
+    /// 比注入式 UI 自动化可靠:不动全局光标/键盘,不受用户在场操作干扰;
+    /// 代价是面板会在屏幕上真实闪现片刻。</summary>
+    internal void RunTodoUiSelfTest()
+    {
+        Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, (Action)(() =>
+        {
+            var pass = 0; var fail = 0;
+            var log = new List<string> { $"== todo-uitest {DateTime.Now:HH:mm:ss} ==" };
+            void Check(bool ok, string what)
+            {
+                if (ok) pass++; else fail++;
+                log.Add($"{(ok ? "PASS" : "FAIL")}  {what}");
+            }
+            FrameworkElement Fake(TodoVm v) => new System.Windows.Controls.Button { Tag = v };
+            try
+            {
+                // 上次自测异常中断可能残留测试条目,先清场再取基准(真实数据可能本就有等待项)
+                foreach (var t in _todo.RawItems.Where(t => t.Text.StartsWith("UIT-")).ToList())
+                    _todo.RemoveWithUndo(t.Id, out _);
+                var before = _todo.RawItems.Count;
+                var beforeOpen = _todo.RawItems.Count(t => !t.Done);
+                var beforeWaiting = _todo.RawItems.Count(t => !t.Done && !TodoStore.IsReady(t, _todo.RawItems));
+                ShowBall(); // 吸边态先唤出(ExpandTodo 仅 Free 态生效)
+                ExpandTodo();
+                Check(_mode == Mode.Todo && TodoHost.Visibility == Visibility.Visible, "打开待办面板");
+
+                // 1) 多条入库(与回车同路径:AddTodo 读输入框)
+                TodoInput.Text = "UIT-A"; AddTodo();
+                TodoInput.Text = "UIT-B"; AddTodo();
+                var vA = _todoVms.FirstOrDefault(v => v.Text == "UIT-A");
+                var vB = _todoVms.FirstOrDefault(v => v.Text == "UIT-B");
+                Check(vA != null && vB != null && TodoInput.Text.Length == 0, "添加两条待办,输入框清空");
+                var expectedCount = beforeWaiting > 0
+                    ? $"{beforeOpen - beforeWaiting + 2} 项可做 · {beforeWaiting} 项等待"
+                    : $"{beforeOpen + 2} 项待办";
+                Check(TodoCount.Text == expectedCount, $"头部计数刷新({TodoCount.Text})");
+                var todoView = CollectionViewSource.GetDefaultView(_todoVms);
+                Check(todoView.GroupDescriptions.Count == 1 && vA!.Section == "接下来" && vB!.Section == "接下来",
+                      "新待办进入“接下来”分组");
+
+                // 2) 连线模式:链接钮选 UIT-B(给 B 选前置),再点 UIT-A → A 是 B 的前置
+                TodoLinkClick(Fake(vB!), null!);
+                Check(_todoLinkSource == vB && TodoCount.Text.StartsWith("连线中"), "进入连线模式,头部提示");
+                TodoToggleClick(Fake(vA!), null!);
+                Check(_todoLinkSource == null, "选定前置后自动退出连线模式");
+                vB = _todoVms.First(v => v.Text == "UIT-B");
+                vA = _todoVms.First(v => v.Text == "UIT-A");
+                Check(vB.IsWaiting && vB.WaitCount == 1 && vB.MetaText == "等待 1 项前置：UIT-A", "被挡条目副文本:等待 1 项前置及在等谁");
+                Check(vA.UnlockCount == 1 && vA.MetaText.Contains("完成解锁 1"), "前置条目副文本:完成解锁 1");
+                Check(TodoCount.Text.Contains("项可做") && TodoCount.Text.Contains("项等待"), "头部双态计数(N 可做 · N 等待)");
+                var dependencyGroups = todoView.Groups?.Cast<CollectionViewGroup>().Select(g => g.Name?.ToString()).ToList() ?? new();
+                Check(vA.Section == "接下来" && vB.Section == "等待中"
+                      && dependencyGroups.Contains("接下来") && dependencyGroups.Contains("等待中"),
+                      "设置前置后自动拆成“接下来/等待中”两组");
+
+                // 3) 完成前置 → 依赖条目解锁(NextTodo:完成一件解锁下一件)
+                TodoToggleClick(Fake(vA), null!);
+                vB = _todoVms.First(v => v.Text == "UIT-B");
+                vA = _todoVms.First(v => v.Text == "UIT-A");
+                Check(vA.Done && !vB.IsWaiting, "完成前置后,依赖条目解锁变可做");
+                var doneGroups = todoView.Groups?.Cast<CollectionViewGroup>().Select(g => g.Name?.ToString()).ToList() ?? new();
+                Check(vA.Section == "已完成" && vB.Section == "接下来" && doneGroups.Contains("已完成"),
+                      "完成前置后自动归入“已完成”,解锁项回到“接下来”");
+
+                // 4) 删除 + 撤销恢复(依赖随快照双向接回)
+                TodoRemoveClick(Fake(vB!), null!);
+                Check(_lastRemovedTodo != null && TodoCount.Text == "已删除 · Ctrl+Z 撤销", "删除后头部提示可撤销");
+                if (_todo.Restore(_lastRemovedTodo!) != null)
+                {
+                    _lastRemovedTodo = null;
+                    RefreshTodoList();
+                }
+                vB = _todoVms.FirstOrDefault(v => v.Text == "UIT-B");
+                Check(vB != null && !vB.IsWaiting && vB.WaitCount == 0, "撤销恢复:条目与依赖状态回来(前置已完成)");
+
+                // 5) 清场:两条都删,回到自测前状态
+                TodoRemoveClick(Fake(vA!), null!);
+                TodoRemoveClick(Fake(vB!), null!);
+                var clean = !_todo.RawItems.Any(t => t.Text.StartsWith("UIT-"));
+                Check(clean && _todo.RawItems.Count == before, "清理测试条目,数据还原");
+
+                // 6) 重叠回归:高面板 + 球在屏幕中央时,上下都放不下完整面板,必须压缩而非压球。
+                TodoInput.Text = string.Join("\n", Enumerable.Range(0, 12).Select(i => $"UIT-L{i}"));
+                AddTodo();
+                var oldCx = _cx; var oldCy = _cy;
+                _cx = WorkArea.Left + WorkArea.Width / 2;
+                _cy = WorkArea.Top + WorkArea.Height / 2;
+                LayoutTodo();
+                UpdateLayout();
+                var ballRect = new Rect(_cx - BallSz / 2, _cy - BallSz / 2, BallSz, BallSz);
+                var panelRect = new Rect(Left + TodoHost.Margin.Left, Top + TodoHost.Margin.Top,
+                    TodoHost.Width, TodoHost.Height);
+                Check(!ballRect.IntersectsWith(panelRect), "高面板在屏幕中央展开也不与小球重叠");
+                Check(panelRect.Top >= WorkArea.Top + 1 && panelRect.Bottom <= WorkArea.Bottom - 1,
+                      "压缩后的面板仍完整位于工作区内");
+                foreach (var t in _todo.RawItems.Where(t => t.Text.StartsWith("UIT-L")).ToList())
+                    _todo.RemoveWithUndo(t.Id, out _);
+                _cx = oldCx; _cy = oldCy;
+                RefreshTodoList();
+                Check(!_todo.RawItems.Any(t => t.Text.StartsWith("UIT-")) && _todo.RawItems.Count == before,
+                      "布局压力测试后数据还原");
+
+                CollapseTodo(true);
+                Check(_mode == Mode.Free, "收起面板");
+            }
+            catch (Exception ex)
+            {
+                fail++;
+                log.Add($"FAIL  异常: {ex}");
+            }
+            log.Add($"== RESULT: {(fail == 0 ? "PASS" : "FAIL")} {pass}/{pass + fail} ==");
+            try
+            {
+                File.WriteAllText(Path.Combine(RecordStore.DefaultDataDir, "uitest_result.txt"),
+                    string.Join("\n", log) + "\n");
+            }
+            catch { }
+        }));
     }
 
     // ---------- 截图 ----------
@@ -880,19 +1111,35 @@ public sealed class RecordViewModel : INotifyPropertyChanged
     private bool _lastRun;
 }
 
-/// <summary>待办展示项(完成状态参与模板触发器;Created 供筛选,CreatedText 供显示)。</summary>
+/// <summary>待办展示项(完成状态参与模板触发器;Created 供筛选)。
+/// 依赖派生(NextTodo):IsWaiting=等待前置,WaitCount=未完成前置数,
+/// UnlockCount=完成本条能解锁几项;MetaText 把三者与创建时间合并为一条副文本。</summary>
 public sealed class TodoVm
 {
     public string Id { get; }
     public string Text { get; }
     public bool Done { get; }
+    public bool IsWaiting { get; }
+    public int WaitCount { get; }
+    /// <summary>等待项的"在等谁"提示(含开头冒号):如":任务A、任务B…"。</summary>
+    public string BlockerHint { get; }
+    public int UnlockCount { get; }
     public string Created { get; }
     public string CreatedText { get; }
+    /// <summary>NextTodo 式三段视图:先聚焦现在能做,等待与完成各自成组。</summary>
+    public string Section => Done ? "已完成" : IsWaiting ? "等待中" : "接下来";
+    public string MetaText { get; }
 
-    public TodoVm(string id, string text, bool done, string created)
+    public TodoVm(string id, string text, bool done, bool isWaiting, int waitCount,
+        string blockerHint, int unlockCount, string created)
     {
         Id = id; Text = text; Done = done; Created = created;
+        IsWaiting = isWaiting; WaitCount = waitCount; BlockerHint = blockerHint;
+        UnlockCount = unlockCount;
         CreatedText = FormatCreated(created);
+        MetaText = IsWaiting ? $"等待 {WaitCount} 项前置{BlockerHint}"
+                 : UnlockCount > 0 ? $"{CreatedText} · 完成解锁 {UnlockCount}"
+                 : CreatedText;
     }
 
     /// <summary>人类友好格式:今天/昨天带时刻,同年只记月日,往年缩略年份。</summary>

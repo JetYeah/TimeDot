@@ -51,6 +51,26 @@ public partial class App : Application
         var win = new MainWindow(_store, quick, todo);
         if (e.Args.Contains("--expanded", StringComparer.OrdinalIgnoreCase))
             win.DebugShowExpanded();
+        // --todo-show:保持待办展开,供截图检查分组与面板/球间距
+        if (e.Args.Contains("--todo-show", StringComparer.OrdinalIgnoreCase))
+            win.DebugShowTodo();
+        // --auto-repro=N:自动循环展开/收起 N 次(复现动画/残影问题)
+        var reproArg = Array.Find(e.Args, a => a.StartsWith("--auto-repro=", StringComparison.OrdinalIgnoreCase));
+        if (reproArg != null && int.TryParse(reproArg["--auto-repro=".Length..], out var reproTimes))
+            win.AutoRepro(reproTimes);
+        // --auto-repro-dock=N[,act]:吸边启动→唤出→环形开合 N 次(复现环形残影的用户路径)
+        var reproDockArg = Array.Find(e.Args, a => a.StartsWith("--auto-repro-dock=", StringComparison.OrdinalIgnoreCase));
+        if (reproDockArg != null)
+        {
+            var parts = reproDockArg["--auto-repro-dock=".Length..].Split(',');
+            if (int.TryParse(parts[0], out var dockTimes))
+                win.AutoReproDock(dockTimes, parts.Any(p => p.Equals("act", StringComparison.OrdinalIgnoreCase)));
+        }
+        // --no-dispel:调试,跳过收起尾部的 WebView 隐藏/重显(判定残影归属)
+        win.DispelOff = e.Args.Contains("--no-dispel", StringComparer.OrdinalIgnoreCase);
+        // --todo-uitest:白盒自测待办依赖功能(真实 UI 路径,结果写 uitest_result.txt)
+        if (e.Args.Contains("--todo-uitest", StringComparer.OrdinalIgnoreCase))
+            win.RunTodoUiSelfTest();
         win.Show();
 
         InitTray(win);

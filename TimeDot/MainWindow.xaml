@@ -436,8 +436,9 @@
                             </ItemsControl.ItemsPanel>
                                 <ItemsControl.ItemTemplate>
                                     <DataTemplate>
+                                        <!-- 与待办卡片同风格:常态浅底 + 发丝描边,行间留白形成卡片分隔 -->
                                         <Border x:Name="Row" CornerRadius="10" Padding="9,8" Margin="0,0,0,7"
-                                                Background="Transparent" BorderBrush="Transparent"
+                                                Background="#0A000000" BorderBrush="{StaticResource Hairline}"
                                                 BorderThickness="1" Tag="{Binding}">
                                             <Grid>
                                                 <Grid.ColumnDefinitions>
@@ -693,14 +694,17 @@
                                             </Grid>
                                         </Border>
                                         <DataTemplate.Triggers>
+                                            <!-- 悬停态与进行中同时命中时,后声明的进行中触发器胜出:
+                                                 计时中的卡片保持强调底色,不会悬停后褪回普通悬停色 -->
+                                            <Trigger SourceName="Row" Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Row" Property="Background" Value="#16C04522"/>
+                                                <Setter TargetName="Row" Property="BorderBrush" Value="#59C04522"/>
+                                            </Trigger>
                                             <DataTrigger Binding="{Binding IsRunning}" Value="True">
-                                                <Setter TargetName="Row" Property="Background" Value="#0DC04522"/>
+                                                <Setter TargetName="Row" Property="Background" Value="#12C04522"/>
                                                 <Setter TargetName="Row" Property="BorderBrush" Value="{StaticResource AccentDim}"/>
                                                 <Setter TargetName="dur" Property="Foreground" Value="{StaticResource Accent}"/>
                                             </DataTrigger>
-                                            <Trigger SourceName="Row" Property="IsMouseOver" Value="True">
-                                                <Setter TargetName="Row" Property="Background" Value="#0A000000"/>
-                                            </Trigger>
                                         </DataTemplate.Triggers>
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>
@@ -725,7 +729,9 @@
             </Border>
         </Border>
 
-        <!-- ============ 环形菜单(单击球唤出,扇区由代码生成) ============ -->
+        <!-- ============ 环形菜单(单击球唤出,扇区由代码生成) ============
+             真球(WebView2)在环形期间不隐藏:扇区内缘让出了球方块,且代码里给本容器设了
+             “整窗减去球方块外接圆”的 Clip——方块之内永远没有 WPF 像素(见 ExpandRadial)。 -->
         <Grid x:Name="RadialHost" Visibility="Collapsed" Opacity="0" HorizontalAlignment="Left"
               VerticalAlignment="Top" IsHitTestVisible="True">
             <Canvas x:Name="RadialCanvas" RenderTransformOrigin="0.5,0.5">
@@ -735,29 +741,8 @@
             </Canvas>
         </Grid>
 
-        <!-- ============ 球替身(环形菜单期间顶替真球) ============
-             真球是 WebView2,其方形 HWND 在 Win32 层永远盖住 WPF 渲染——
-             环形展开时若不撤下,斜向扇区的内缘会被球光晕方形吃掉。
-             替身不参与 RadialHost 淡入:顶替/恢复都是瞬间无缝切换。 -->
-        <Grid x:Name="BallStandin" Visibility="Collapsed" Width="70" Height="70"
-              HorizontalAlignment="Left" VerticalAlignment="Top" Cursor="Hand" ToolTip="收起菜单">
-            <Ellipse Fill="#FFFCF9F2" Stroke="#2626231E" StrokeThickness="1">
-                <Ellipse.Effect>
-                    <DropShadowEffect Color="#000000" BlurRadius="12" ShadowDepth="3" Opacity="0.16" Direction="270"/>
-                </Ellipse.Effect>
-            </Ellipse>
-            <!-- 两枚墨色竖条眼(待机放空神态) -->
-            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-                <Rectangle Width="4.5" Height="13" RadiusX="2.25" RadiusY="2.25" Fill="#FF26231E"/>
-                <Rectangle Width="4.5" Height="13" RadiusX="2.25" RadiusY="2.25" Fill="#FF26231E" Margin="7.5,0,0,0"/>
-            </StackPanel>
-            <Grid.RenderTransform>
-                <ScaleTransform x:Name="StandinBreath"/>
-            </Grid.RenderTransform>
-        </Grid>
-
         <!-- ============ 待办面板(环形菜单唤出) ============ -->
-        <Border x:Name="TodoHost" Visibility="Collapsed" Width="342" HorizontalAlignment="Left"
+        <Border x:Name="TodoHost" Visibility="Collapsed" Width="460" HorizontalAlignment="Left"
                 VerticalAlignment="Top" Margin="0,0,0,0">
             <Border x:Name="TodoCard" CornerRadius="14" Opacity="0"
                     Background="{StaticResource PanelBg}" BorderBrush="{StaticResource Hairline}"
@@ -773,7 +758,7 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
 
                     <!-- 头部 -->
@@ -828,13 +813,13 @@
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <Grid>
-                            <Border Style="{StaticResource FieldShell}" Height="32">
+                            <Border Style="{StaticResource FieldShell}" Height="40">
                                 <TextBox x:Name="TodoInput" VerticalContentAlignment="Center" BorderThickness="0"
-                                         Background="Transparent" FontSize="12"
+                                         Background="Transparent" FontSize="12" TextWrapping="Wrap"
                                          Foreground="{StaticResource TextMain}" CaretBrush="{StaticResource Accent}"
                                          KeyDown="TodoInputKeyDown"/>
                             </Border>
-                            <TextBlock Text="新待办,回车添加" IsHitTestVisible="False" FontSize="11"
+                            <TextBlock Text="新待办，回车添加 · Shift+Enter 换行，多行一次入库" IsHitTestVisible="False" FontSize="11"
                                        Foreground="{StaticResource TextFaint}" VerticalAlignment="Center" Margin="11,0,0,0">
                                 <TextBlock.Style>
                                     <Style TargetType="TextBlock">
@@ -877,18 +862,70 @@
                         <RadioButton Style="{StaticResource FilterChip}" GroupName="TodoFilter"
                                      Tag="Week" Content="当周" Click="TodoFilterClick" ToolTip="本周添加的"/>
                         <RadioButton Style="{StaticResource FilterChip}" GroupName="TodoFilter"
-                                     Tag="Open" Content="待完成" Click="TodoFilterClick" ToolTip="未完成"/>
+                                     Tag="Ready" Content="接下来" Click="TodoFilterClick" ToolTip="只看现在能做的（NextTodo 的“接下来”）"/>
+                        <RadioButton Style="{StaticResource FilterChip}" GroupName="TodoFilter"
+                                     Tag="Open" Content="待完成" Click="TodoFilterClick" ToolTip="未完成（含等待中）"/>
                         <RadioButton Style="{StaticResource FilterChip}" GroupName="TodoFilter"
                                      Tag="Done" Content="已完成" Click="TodoFilterClick" ToolTip="已完成"/>
                     </StackPanel>
 
                     <!-- 列表(勾选完成,× 删除;条目下方带创建时间) -->
                     <Grid Grid.Row="3">
-                        <ScrollViewer MaxHeight="300" VerticalScrollBarVisibility="Auto">
+                        <ScrollViewer MaxHeight="460" VerticalScrollBarVisibility="Auto">
                             <ScrollViewer.Resources>
                                 <Style TargetType="ScrollBar" BasedOn="{StaticResource ThinScroll}"/>
                             </ScrollViewer.Resources>
                             <ItemsControl x:Name="TodoList">
+                                <!-- NextTodo 式状态看板:接下来 / 等待中 / 已完成,而不是一屏平铺。 -->
+                                <ItemsControl.GroupStyle>
+                                    <GroupStyle>
+                                        <GroupStyle.ContainerStyle>
+                                            <Style TargetType="GroupItem">
+                                                <Setter Property="Template">
+                                                    <Setter.Value>
+                                                        <ControlTemplate TargetType="GroupItem">
+                                                            <StackPanel>
+                                                                <ContentPresenter Content="{TemplateBinding Content}"
+                                                                                  ContentTemplate="{TemplateBinding ContentTemplate}"/>
+                                                                <ItemsPresenter/>
+                                                            </StackPanel>
+                                                        </ControlTemplate>
+                                                    </Setter.Value>
+                                                </Setter>
+                                            </Style>
+                                        </GroupStyle.ContainerStyle>
+                                        <GroupStyle.HeaderTemplate>
+                                            <DataTemplate>
+                                                <Grid Margin="2,9,4,5">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                        <ColumnDefinition Width="*"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock x:Name="section" Text="{Binding Name}" FontSize="11"
+                                                               FontWeight="SemiBold" Foreground="{StaticResource TextSub}"
+                                                               VerticalAlignment="Center"/>
+                                                    <Border x:Name="count" Grid.Column="1" Margin="6,0,0,0" Padding="6,1"
+                                                            CornerRadius="7" Background="#0F000000" VerticalAlignment="Center">
+                                                        <TextBlock Text="{Binding ItemCount}" FontSize="9"
+                                                                   Foreground="{StaticResource TextSub}"/>
+                                                    </Border>
+                                                    <Rectangle Grid.Column="2" Height="1" Margin="9,0,0,0"
+                                                               Fill="{StaticResource Hairline}" VerticalAlignment="Center"/>
+                                                </Grid>
+                                                <DataTemplate.Triggers>
+                                                    <DataTrigger Binding="{Binding Name}" Value="接下来">
+                                                        <Setter TargetName="section" Property="Foreground" Value="{StaticResource Accent}"/>
+                                                        <Setter TargetName="count" Property="Background" Value="{StaticResource AccentSoft}"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding Name}" Value="已完成">
+                                                        <Setter TargetName="section" Property="Foreground" Value="{StaticResource TextFaint}"/>
+                                                    </DataTrigger>
+                                                </DataTemplate.Triggers>
+                                            </DataTemplate>
+                                        </GroupStyle.HeaderTemplate>
+                                    </GroupStyle>
+                                </ItemsControl.GroupStyle>
                                 <ItemsControl.ItemTemplate>
                                     <DataTemplate>
                                         <Grid Margin="0,0,0,6">
@@ -896,21 +933,25 @@
                                                     Focusable="False" ToolTip="点击切换完成状态">
                                                 <Button.Template>
                                                     <ControlTemplate TargetType="Button">
-                                                        <Border x:Name="tb" CornerRadius="8" Background="#0A000000"
+                                                        <Border x:Name="tb" CornerRadius="9" Background="#0A000000"
                                                                 BorderBrush="{StaticResource Hairline}" BorderThickness="1"
-                                                                Padding="8,5">
+                                                                Padding="9,7,58,7" MinHeight="48">
                                                             <StackPanel>
                                                                 <StackPanel Orientation="Horizontal">
-                                                                    <Border x:Name="box" Width="15" Height="15" CornerRadius="4"
+                                                                    <Border x:Name="box" Width="16" Height="16" CornerRadius="8"
                                                                             BorderBrush="#99C04522" BorderThickness="1.2"
-                                                                            Background="Transparent" VerticalAlignment="Center"/>
-                                                                    <TextBlock x:Name="tt" Text="{Binding Text}" FontSize="12"
+                                                                            Background="Transparent" VerticalAlignment="Center">
+                                                                        <TextBlock x:Name="check" Text="✓" FontSize="10" FontWeight="Bold"
+                                                                                   Foreground="#FFF7F5EF" HorizontalAlignment="Center"
+                                                                                   VerticalAlignment="Center" Visibility="Collapsed"/>
+                                                                    </Border>
+                                                                    <TextBlock x:Name="tt" Text="{Binding Text}" FontSize="12.5"
                                                                                Foreground="{StaticResource TextMain}" TextWrapping="Wrap"
-                                                                               MaxHeight="52" TextTrimming="CharacterEllipsis"
+                                                                               MaxHeight="90" TextTrimming="CharacterEllipsis"
                                                                                Margin="8,0,0,0" VerticalAlignment="Center"/>
                                                                 </StackPanel>
-                                                                <!-- 创建时间:添加时自动记录,当日/当周筛选的依据 -->
-                                                                <TextBlock Text="{Binding CreatedText}" FontSize="9.5"
+                                                                <!-- 副文本:等待 N 项前置 / 完成解锁 N / 创建时间 -->
+                                                                <TextBlock Text="{Binding MetaText}" FontSize="9.5"
                                                                            Foreground="{StaticResource TextFaint}" Margin="23,2,0,0"/>
                                                             </StackPanel>
                                                         </Border>
@@ -919,6 +960,13 @@
                                                                 <Setter TargetName="tt" Property="Foreground" Value="{StaticResource TextFaint}"/>
                                                                 <Setter TargetName="tt" Property="TextDecorations" Value="Strikethrough"/>
                                                                 <Setter TargetName="box" Property="Background" Value="#FFC04522"/>
+                                                                <Setter TargetName="check" Property="Visibility" Value="Visible"/>
+                                                            </DataTrigger>
+                                                            <!-- 等待前置的项置灰(NextTodo"等待中"):不算入当前可做,但仍在列表里可见 -->
+                                                            <DataTrigger Binding="{Binding IsWaiting}" Value="True">
+                                                                <Setter TargetName="tt" Property="Foreground" Value="{StaticResource TextFaint}"/>
+                                                                <Setter TargetName="box" Property="BorderBrush" Value="#55C04522"/>
+                                                                <Setter TargetName="tb" Property="Background" Value="Transparent"/>
                                                             </DataTrigger>
                                                             <Trigger Property="IsMouseOver" Value="True">
                                                                 <Setter TargetName="tb" Property="Background" Value="#16C04522"/>
@@ -928,24 +976,44 @@
                                                     </ControlTemplate>
                                                 </Button.Template>
                                             </Button>
-                                            <Button Click="TodoRemoveClick" Tag="{Binding}" Focusable="False" Cursor="Hand"
-                                                    HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-4,-4,0"
-                                                    Width="18" Height="18" ToolTip="删除">
-                                                <Button.Template>
-                                                    <ControlTemplate TargetType="Button">
-                                                        <Border Background="#E6F7F5EF" CornerRadius="9">
-                                                            <TextBlock x:Name="x" Text="&#xE711;" FontFamily="Segoe MDL2 Assets"
-                                                                       FontSize="8" Foreground="#FF98917F"
-                                                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                                        </Border>
-                                                        <ControlTemplate.Triggers>
-                                                            <Trigger Property="IsMouseOver" Value="True">
-                                                                <Setter TargetName="x" Property="Foreground" Value="{StaticResource Danger}"/>
-                                                            </Trigger>
-                                                        </ControlTemplate.Triggers>
-                                                    </ControlTemplate>
-                                                </Button.Template>
-                                            </Button>
+                                            <!-- 行尾操作:链接钮(设/拆前置依赖) + 删除钮 -->
+                                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,5,0">
+                                                <Button Click="TodoLinkClick" Tag="{Binding}" Focusable="False" Cursor="Hand"
+                                                        Width="22" Height="22" Margin="0,0,3,0"
+                                                        ToolTip="设置前置：完成后才能做本条（点后选另一条，重复点拆除）">
+                                                    <Button.Template>
+                                                        <ControlTemplate TargetType="Button">
+                                                            <Border Background="#E6F7F5EF" CornerRadius="9">
+                                                                <TextBlock x:Name="lk" Text="&#xE71B;" FontFamily="Segoe MDL2 Assets"
+                                                                           FontSize="8" Foreground="#FF98917F"
+                                                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                            </Border>
+                                                            <ControlTemplate.Triggers>
+                                                                <Trigger Property="IsMouseOver" Value="True">
+                                                                    <Setter TargetName="lk" Property="Foreground" Value="{StaticResource Accent}"/>
+                                                                </Trigger>
+                                                            </ControlTemplate.Triggers>
+                                                        </ControlTemplate>
+                                                    </Button.Template>
+                                                </Button>
+                                                <Button Click="TodoRemoveClick" Tag="{Binding}" Focusable="False" Cursor="Hand"
+                                                        Width="22" Height="22" ToolTip="删除（Ctrl+Z 撤销）">
+                                                    <Button.Template>
+                                                        <ControlTemplate TargetType="Button">
+                                                            <Border Background="#E6F7F5EF" CornerRadius="9">
+                                                                <TextBlock x:Name="x" Text="&#xE711;" FontFamily="Segoe MDL2 Assets"
+                                                                           FontSize="8" Foreground="#FF98917F"
+                                                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                            </Border>
+                                                            <ControlTemplate.Triggers>
+                                                                <Trigger Property="IsMouseOver" Value="True">
+                                                                    <Setter TargetName="x" Property="Foreground" Value="{StaticResource Danger}"/>
+                                                                </Trigger>
+                                                            </ControlTemplate.Triggers>
+                                                        </ControlTemplate>
+                                                    </Button.Template>
+                                                </Button>
+                                            </StackPanel>
                                         </Grid>
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>

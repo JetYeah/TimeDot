@@ -1,5 +1,6 @@
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
@@ -21,9 +22,14 @@ public partial class MainWindow : Window
     private const double BallSz = 84;            // 球可视宿主(含外环)
     private const double PanelW = 402;           // 面板总宽(382 内容 + 2*10 阴影边距)
     private const double QuickW = 342;          // 快捷回复面板总宽(同上口径)
-    private const double TodoW = 342;           // 待办面板总宽(同上口径)
-    private const double RadialOut = 60;        // 环形菜单外半径(球边缘到扇区外缘)
+    private const double TodoW = 460;           // 待办面板总宽(同上口径;待办已升格为依赖看板,比速记更宽)
+    // 环形菜单几何。真球是 84×84 的 WebView 方形 hwnd,方块半对角线 = 42√2 ≈ 59.4:扇区内缘必须
+    // 整体让出这个方块(含描边与投影)——方块之内一旦被 WPF 写入非透明像素,合成层就可能把
+    // 它滞留成"球外一圈"残影(2026-11-24 实证,见 GHOST_DEBUG.md)。
+    private const double RadialInner = 63;       // 扇区内缘到球心(> 方块半对角线)
+    private const double RadialOut = 68;         // 环形菜单外半径(球边缘到扇区外缘)
     private const double RadialPad = 16;         // 扇区外缘到窗口边的余量(容纳投影,避免被窗口硬切)
+    private const double RadialSz = BallSz + 2 * (RadialOut + RadialPad); // 自由态/环形态窗口边长(252)
     private const double StripLen = 72;          // 吸边条长度
     private const double StripThick = 10;        // 吸边条厚度
     private const double DockSnapDist = 44;      // 拖拽松手时距边多近判定吸附
@@ -85,6 +91,10 @@ public partial class MainWindow : Window
     [DllImport("user32.dll")] private static extern int SetWindowLong(IntPtr hWnd, int index, int value);
     private const int GWL_EXSTYLE = -20;
     private const int WS_EX_TRANSPARENT = 0x00000020;
+    [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr parent, EnumChildProc cb, IntPtr lp);
+    private delegate bool EnumChildProc(IntPtr hWnd, IntPtr lp);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr hWnd, StringBuilder sb, int max);
+    private const int SW_HIDE = 0, SW_SHOW = 5;
 
     // ---------- 残影清理(强制 DWM 重合成指定屏幕区域) ----------
     // 覆盖窗必须有真实像素内容(用 UpdateLayeredWindow 显式供给),否则 DWM 不会合成它——
@@ -197,11 +207,11 @@ public partial class MainWindow : Window
         _autoDockTimer.Tick += (_, _) => AutoDockCheck();
         _tick.Tick += (_, _) => OnTick();
         _passTimer.Tick += (_, _) => UpdateWebPass();
-        // 环形菜单期间替身球顶替真球(WebView2),点替身 = 再点球收起菜单
-        BallStandin.MouseLeftButtonUp += (_, _) =>
-        {
-            if (_mode == Mode.Radial) CollapseRadial(true);
-        };
+        // 环形菜单只在球方块之外绘制(含投影与缩放动画期间):方块内永远只有 WebView,没有 WPF 像素
+        var c = RadialSz / 2;
+        RadialHost.Clip = new CombinedGeometry(GeometryCombineMode.Exclude,
+            new RectangleGeometry(new Rect(0, 0, RadialSz, RadialSz)),
+            new EllipseGeometry(new Point(c, c), BallSz / 2 * Math.Sqrt(2) + 1.5, BallSz / 2 * Math.Sqrt(2) + 1.5));
         Deactivated += (_, _) =>
         {
             if (_mode == Mode.Expanded && !_panelPinned) CollapsePanel(true);
@@ -234,6 +244,8 @@ public partial class MainWindow : Window
             }
             else if (_mode == Mode.Todo)
             {
+                // 连线模式中:Esc 先退出连线,不收起面板(输入框内另有一层同样的拦截)
+                if (_todoLinkSource != null) { _todoLinkSource = null; RefreshTodoList(); e.Handled = true; return; }
                 if (_todoPinned) return;
                 CollapseTodo(true);
             }
@@ -255,16 +267,16 @@ public partial class MainWindow : Window
                                                : wa.Top + 150;
         _dockOffset = cfg.DockOffset;
 
-        if (cfg.DockSide is "left" or "right" or "top" or "bottom")
+        if (ForceDocked || cfg.DockSide is "left" or "right" or "top" or "bottom")
         {
-            _dockSide = Enum.Parse<Side>(cfg.DockSide, true);
+            _dockSide = ForceDocked ? Side.Right : Enum.Parse<Side>(cfg.DockSide, true);
             _mode = Mode.Docked;
             StopLoops();
             ApplyDockedLayout();
         }
         else
         {
-            LayoutBallOnly(shrink: true); // 启动首布局:窗口缩为球大小
+            LayoutBallOnly(recenter: true); // 启动首布局:窗口摆成以球心为中心的环形尺寸
             StartLoops();
         }
 
@@ -316,6 +328,84 @@ public partial class MainWindow : Window
         };
     }
 
+    /// <summary>调试用:启动后保持待办展开,供截图检查分组与实际窗口几何(--todo-show)。</summary>
+    internal void DebugShowTodo()
+    {
+        Loaded += async (_, _) =>
+        {
+            await Task.Delay(250);
+            ShowBall();
+            await Task.Delay(350); // 等吸边唤回动画落定,避免后续窗口补间覆盖面板布局
+            if (_mode == Mode.Free) ExpandTodo();
+        };
+    }
+
+    // 调试用:自动循环展开/收起 N 次,复现动画/残影问题(--auto-repro=N)。
+    // 每轮依次跑 环形开合 + 面板/待办交替开合:面板收起会缩窗(产生暴露区),是驻留
+    // 残影的历史入口;待办路径是 2026-09-30 用户实证的触发路径(展开闪残影,再点常驻)。
+    // 鼠标注入受 UIPI 限制(前台有提权进程时被系统静默丢弃),程序自身驱动开合不受影响。
+    // 调试用:吸边启动 → 托盘唤出(动画) → 环形开合 N 次(--auto-repro-dock=N[,act])。
+    // 用户实证的环形残影路径从"吸边态唤出"开始(WebView 在 BallHost 隐藏态下初始化,唤出才首次
+    // 显示),与 --auto-repro 的"自由态启动"路径不同;act 表示每次展开前像真实点击那样激活窗口。
+    // 开始前等 WebView 就绪,否则首轮开合发生在球 hwnd 尚未创建时,采样无意义。
+    internal bool ForceDocked;
+    internal bool DispelOff; // 调试:--no-dispel,跳过收起尾部的 WebView 隐藏/重显,用于判定残影归属
+    internal void AutoReproDock(int times, bool activate)
+    {
+        ForceDocked = true;
+        Loaded += async (_, _) =>
+        {
+            await WaitWebReadyAsync();
+            await Task.Delay(800);
+            ShowBall();
+            await Task.Delay(700);
+            for (int i = 0; i < times; i++)
+            {
+                if (activate) Activate();
+                if (_mode == Mode.Free) ExpandRadial();
+                await Task.Delay(1200);
+                if (_mode == Mode.Radial) CollapseRadial(true);
+                await Task.Delay(1500);
+            }
+        };
+    }
+
+    /// <summary>调试驱动用:等 WebView 页面就绪(最多 ~15s),再留 300ms 给首帧呈现。</summary>
+    private async Task WaitWebReadyAsync()
+    {
+        for (var i = 0; i < 150 && !_webReady; i++) await Task.Delay(100);
+        await Task.Delay(300);
+    }
+
+    internal void AutoRepro(int times)
+    {
+        Loaded += async (_, _) =>
+        {
+            await WaitWebReadyAsync();
+            await Task.Delay(400);
+            for (int i = 0; i < times; i++)
+            {
+                if (_mode == Mode.Free) ExpandRadial();
+                await Task.Delay(1200);
+                if (_mode == Mode.Radial) CollapseRadial(true);
+                await Task.Delay(1500);
+                if (i % 2 == 0)
+                {
+                    if (_mode == Mode.Free) ExpandPanel(focusInput: false);
+                    await Task.Delay(1200);
+                    if (_mode == Mode.Expanded && !_panelPinned) CollapsePanel(true);
+                }
+                else
+                {
+                    if (_mode == Mode.Free) ExpandTodo();
+                    await Task.Delay(1200);
+                    if (_mode == Mode.Todo && !_todoPinned) CollapseTodo(true);
+                }
+                await Task.Delay(1500);
+            }
+        };
+    }
+
     // ---------- 布局 ----------
 
     private static double Clamp(double v, double lo, double hi) => Math.Max(lo, Math.Min(hi, v));
@@ -340,33 +430,58 @@ public partial class MainWindow : Window
         catch { /* 窗口句柄未就绪等异常时静默跳过,下次再试 */ }
     }
 
-    /// <summary>收起态布局。shrink=false(默认,收起路径):窗口保持当前矩形不缩——
+    /// <summary>收起态布局。recenter=false(默认,收起路径):窗口保持当前矩形不缩——
     /// 根治驻留型残影:缩窗会在下层(mstsc 远程桌面等)显露曾显示扇区/面板的区域,这类
     /// 应用的呈现管线不重绘被显露的区域(远程画面静止时永不提交新帧,WM_PAINT/RedrawWindow
     /// 实证无效),球的旧像素无限期滞留。不缩窗则没有显露区域;大矩形整窗点击穿透
     /// (SetSelfPass),透明区域不挡下方应用;球按球心用 Margin 定位,视觉零变化。
-    /// shrink=true(仅启动):首次布局,窗口缩为恰好包住球。</summary>
-    private void LayoutBallOnly(bool shrink = false)
+    /// recenter=true(启动/吸边唤出):窗口摆成以球心为中心的 RadialSz 正方形——与环形态同几何,
+    /// 自由态↔环形态之间窗口不再缩放、球 hwnd 不再移动,球周围没有任何可供合成层滞留的变更。</summary>
+    private void LayoutBallOnly(bool recenter = false)
     {
-        if (shrink)
+        if (recenter)
         {
-            Width = BallSz; Height = BallSz;
-            Left = _cx - BallSz / 2; Top = _cy - BallSz / 2;
-            BallHost.Margin = new Thickness(0);
+            Width = RadialSz; Height = RadialSz;
+            Left = _cx - RadialSz / 2; Top = _cy - RadialSz / 2;
         }
-        else
-        {
-            // 保持矩形,球定位到大窗口中的球心位置
-            BallHost.Margin = new Thickness(_cx - Left - BallSz / 2, _cy - Top - BallSz / 2, 0, 0);
-        }
+        // 球定位到窗口中的球心位置(保持矩形时按球心换算;recenter 后恰为居中)
+        BallHost.Margin = new Thickness(_cx - Left - BallSz / 2, _cy - Top - BallSz / 2, 0, 0);
         BallHost.Visibility = Visibility.Visible;
-        BallStandin.Visibility = Visibility.Collapsed; // 替身只在环形菜单期间存在
         PanelHost.Visibility = Visibility.Collapsed;
         QuickHost.Visibility = Visibility.Collapsed;
         TodoHost.Visibility = Visibility.Collapsed;
         RadialHost.Visibility = Visibility.Collapsed;
         StripHost.Visibility = Visibility.Collapsed;
-        SetSelfPass(!shrink); // 收起保持大矩形:开整窗穿透;启动小球窗:无需
+        SetSelfPass(true); // 收起态窗口始终大于球:大矩形整窗穿透(球由 WebView 圆外穿透负责)
+        if (!recenter && !DispelOff) _ = DispelWebSurfaceStaleAsync(); // 收起尾部:驱散 WebView 呈现层旧帧(见下)
+    }
+
+    /// <summary>对 WebView 子窗(Chrome_WidgetWin_0)做 SW_HIDE(40ms)→SW_SHOW,驱散呈现层滞留旧帧。
+    /// Runtime 153/154 上合成器翻页会把旧帧块滞留在球 hwnd 的呈现纹理里:屏幕上表现为球 hwnd
+    /// 角部的浅色底板/错位纹理(PrintWindow 读 DOM 表面四角 alpha=0 而屏幕有内容,证明滞留在
+    /// DOM 之下的呈现层;均匀壁纸上不可见,叠在图标/窗口上明显;窗口移动可清,故"拖一下球就好")。
+    /// 隐藏-重显强制浏览器合成器重建表面。仅收起尾部调用一次,非常驻轮询;代价是球眨一下。</summary>
+    private async Task DispelWebSurfaceStaleAsync()
+    {
+        try
+        {
+            await Task.Delay(180); // 等收起呈现与 DispelDwmGhost 首轮清理尘埃落定,避免与动画互扰
+            var self = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+            if (self == IntPtr.Zero) return;
+            var web = IntPtr.Zero;
+            EnumChildWindows(self, (h, lp) =>
+            {
+                var sb = new StringBuilder(64);
+                GetClassName(h, sb, 64);
+                if (sb.ToString() == "Chrome_WidgetWin_0") { web = h; return false; }
+                return true;
+            }, IntPtr.Zero);
+            if (web == IntPtr.Zero) return;
+            ShowWindow(web, SW_HIDE);
+            await Task.Delay(40);
+            ShowWindow(web, SW_SHOW);
+        }
+        catch { /* 驱散尽力而为,失败不影响主流程 */ }
     }
 
     /// <summary>窗口缩小/移走后,被遗弃的屏幕区域可能滞留 DWM 旧帧像素(残影)。
@@ -803,17 +918,37 @@ public partial class MainWindow : Window
         _lastActivity = DateTime.Now;
     }
 
-    /// <summary>待办面板展开态:与其他面板同套路,优先下展、空间不足翻上、水平夹紧。</summary>
+    /// <summary>待办面板展开态:优先下展、空间不足翻上、水平夹紧。
+    /// 上下都放不下完整面板时压缩高度并让列表滚动;不能只夹位置,否则面板会越过球顶。</summary>
     private void LayoutTodo()
     {
         var oldRect = new Rect(Left, Top, ActualWidth, ActualHeight); // 删减条目后的收缩检测(缩窗可能留 DWM 残影)
         TodoHost.Visibility = Visibility.Visible;
+        // 清掉上一次压缩结果再测量,否则内容变少后仍被旧 Height/MaxHeight 卡住。
+        TodoHost.Height = double.NaN;
+        TodoHost.MaxHeight = double.PositiveInfinity;
         TodoHost.Measure(new Size(TodoW, double.PositiveInfinity));
         var panelH = Math.Min(TodoHost.DesiredSize.Height, WorkArea.Height - 20);
 
         var ballR = new Rect(_cx - BallSz / 2, _cy - BallSz / 2, BallSz, BallSz);
-        double pTop = ballR.Bottom + 4;
-        if (pTop + panelH > WorkArea.Bottom) pTop = Math.Max(WorkArea.Top + 2, ballR.Top - 4 - panelH);
+        var below = Math.Max(0, WorkArea.Bottom - ballR.Bottom - 6); // 4px 间距 + 2px 屏幕边距
+        var above = Math.Max(0, ballR.Top - WorkArea.Top - 6);
+        double pTop;
+        if (panelH <= below) pTop = ballR.Bottom + 4;
+        else if (panelH <= above) pTop = ballR.Top - 4 - panelH;
+        else if (below >= above)
+        {
+            panelH = below;
+            pTop = ballR.Bottom + 4;
+        }
+        else
+        {
+            panelH = above;
+            pTop = ballR.Top - 4 - panelH;
+        }
+        // 显式高度配合列表行的 * 布局,空间不足时由 ScrollViewer 接管,而不是裁内容或压球。
+        TodoHost.MaxHeight = panelH;
+        TodoHost.Height = panelH;
         double pLeft = Clamp(_cx - TodoW / 2, WorkArea.Left + 2, WorkArea.Right - TodoW - 2);
 
         var win = Rect.Union(ballR, new Rect(pLeft, pTop, TodoW, panelH));
@@ -848,6 +983,7 @@ public partial class MainWindow : Window
     {
         if (_mode != Mode.Todo) return;
         if (_todoPinned) { _todoPinned = false; UpdateTodoPinVisual(); } // 显式收起时解锁
+        _todoLinkSource = null; // 收起即退出连线模式,不留悬挂状态
         _mode = Mode.Free;
         StartLoops();
         var fade = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(110))
@@ -889,40 +1025,21 @@ public partial class MainWindow : Window
         new(93, 207, "\uE8C8", "回复", "快捷回复 · 点击即复制"),        // 居中于左侧(9 点)
     };
 
-    /// <summary>单击球:展开环形菜单;再单击收起。</summary>
+    /// <summary>单击球:展开环形菜单;再单击收起。
+    /// 真球(WebView2)全程不撤:旧实现在展开时隐藏球 hwnd、用 WPF 替身球顶替,收起时再显示——
+    /// 球 hwnd 重新进入合成的那一刻,下方还是扇区(淡出才刚开始),方块四角与球外一圈的
+    /// 扇区/投影像素被合成层滞留,就是用户截图里的"球外一圈"残影(2026-11-24)。
+    /// 扇区内缘已整体让出球方块(RadialInner > 方块半对角线,且 RadialHost 挖孔裁剪),
+    /// 真球留在原位没有遮挡冲突,也不再需要替身球。</summary>
     private void ExpandRadial()
     {
         if (_mode != Mode.Free) return;
         SetSelfPass(false); // 收起态主窗整窗穿透中:展开前必须关掉,否则扇区点击穿透
-        // 真球(WebView2)的方形 HWND 在 Win32 层盖住 WPF 渲染——斜向扇区内缘
-        // 会被球光晕方形吃掉。展开期间撤下真球,由替身球无缝顶替中心。
-        BallHost.Visibility = Visibility.Collapsed;
-        BallStandin.Visibility = Visibility.Visible;
-        StartStandinBreath();
         _mode = Mode.Radial;
         LayoutRadial();
         RadialCardOpacityReset();
         ((Storyboard)FindResource("RadialIn")).Begin(this, true);
         _lastActivity = DateTime.Now;
-    }
-
-    /// <summary>替身球呼吸(弥补真球动画;收起时停止)。</summary>
-    private void StartStandinBreath()
-    {
-        var breath = new DoubleAnimation(1, 1.03, TimeSpan.FromSeconds(1.7))
-        {
-            AutoReverse = true,
-            RepeatBehavior = RepeatBehavior.Forever,
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseInOut },
-        };
-        StandinBreath.BeginAnimation(System.Windows.Media.ScaleTransform.ScaleXProperty, breath);
-        StandinBreath.BeginAnimation(System.Windows.Media.ScaleTransform.ScaleYProperty, breath);
-    }
-
-    private void StopStandinBreath()
-    {
-        StandinBreath.BeginAnimation(System.Windows.Media.ScaleTransform.ScaleXProperty, null);
-        StandinBreath.BeginAnimation(System.Windows.Media.ScaleTransform.ScaleYProperty, null);
     }
 
     /// <summary>清掉收起时的本地动画并复位透明度与缩放(交给 RadialIn)。</summary>
@@ -933,17 +1050,16 @@ public partial class MainWindow : Window
         RadialScale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
     }
 
-    /// <summary>环形菜单布局:窗口为以球为中心的正方形,扇区画在 Canvas 上。</summary>
+    /// <summary>环形菜单布局:窗口为以球为中心的正方形,扇区画在 Canvas 上。
+    /// 自由态窗口本就是同尺寸正方形(LayoutBallOnly),这里只是把几何钉死,实际不发生缩放。</summary>
     private void LayoutRadial()
     {
         RadialHost.Visibility = Visibility.Visible;
-        const double size = 2 * (BallSz / 2 + RadialOut + RadialPad); // 球心到窗口边的直径(含投影余量)
-        Width = size; Height = size;
-        Left = _cx - size / 2; Top = _cy - size / 2;
-        BallHost.Margin = new Thickness((size - BallSz) / 2); // 球居中(收起恢复时仍对齐)
-        BallStandin.Margin = new Thickness((size - 70) / 2);   // 替身球(70px)同圆心居中
+        Width = RadialSz; Height = RadialSz;
+        Left = _cx - RadialSz / 2; Top = _cy - RadialSz / 2;
+        BallHost.Margin = new Thickness((RadialSz - BallSz) / 2); // 球居中(与自由态一致)
         RadialHost.Margin = new Thickness(0);
-        RadialCanvas.Width = size; RadialCanvas.Height = size;
+        RadialCanvas.Width = RadialSz; RadialCanvas.Height = RadialSz;
         PanelHost.Visibility = Visibility.Collapsed;
         QuickHost.Visibility = Visibility.Collapsed;
         TodoHost.Visibility = Visibility.Collapsed;
@@ -957,8 +1073,8 @@ public partial class MainWindow : Window
     private void BuildRadialSectors()
     {
         RadialCanvas.Children.Clear();
-        const double c = BallSz / 2 + RadialOut + RadialPad;     // 画布中心(球心)
-        const double r0 = 50, r1 = BallSz / 2 + RadialOut - 4;   // 内缘与球留 8px 缝隙,外缘留边
+        var c = RadialSz / 2;                                    // 画布中心(球心)
+        const double r0 = RadialInner, r1 = BallSz / 2 + RadialOut - 4; // 内缘让出球方块,外缘留边
 
         var normal = new SolidColorBrush(Color.FromArgb(0xE6, 0xF7, 0xF5, 0xEF)); // 纸感常亮
         var hover = new SolidColorBrush(Color.FromArgb(0xCC, 0xC0, 0x45, 0x22));  // 朱砂高亮
@@ -1062,15 +1178,12 @@ public partial class MainWindow : Window
 
     /// <summary>收起环形菜单。followUp:收起后立即进入的功能页——其布局自带窗口几何,
     /// 跳过中间缩球(少一次 resize)。淡出与几何变化隔一渲染帧:同帧内“清像素+缩窗”
-    /// 会让 DWM 把含扇区的旧帧滞留在窗口外区域(图形残留)。</summary>
+    /// 会让 DWM 把含扇区的旧帧滞留在窗口外区域(图形残留)。球(WebView)全程可见,不切换。</summary>
     private void CollapseRadial(bool animate, Action? followUp = null)
     {
         if (_mode != Mode.Radial) return;
         _mode = Mode.Free;
-        // 真球归位、替身退场(瞬间无缝:两者同圆心同尺寸)
-        BallStandin.Visibility = Visibility.Collapsed;
-        StopStandinBreath();
-        BallHost.Visibility = Visibility.Visible;
+        // 真球自始至终可见(见 ExpandRadial):收起只是扇区淡出,球 hwnd 没有任何显示/隐藏切换
         StartLoops();
 
         void Finish()
@@ -1195,9 +1308,10 @@ public partial class MainWindow : Window
         _cy = Clamp(UndockBallCy(), WorkArea.Top + BallSz / 2, WorkArea.Bottom - BallSz / 2);
         StripHost.Visibility = Visibility.Collapsed;
         BallHost.Visibility = Visibility.Visible;
-        var target = new Rect(_cx - BallSz / 2, _cy - BallSz / 2, BallSz, BallSz);
-        if (animate) { BallHost.Margin = new Thickness(0); AnimateWindowTo(target, 190); }
-        else LayoutBallOnly(shrink: true); // 唤出即回到小球窗
+        // 唤出后窗口就是环形尺寸(与自由态/环形态同几何),球 hwnd 之后在开合环形时不再移动
+        var target = new Rect(_cx - RadialSz / 2, _cy - RadialSz / 2, RadialSz, RadialSz);
+        if (animate) { BallHost.Margin = new Thickness((RadialSz - BallSz) / 2); AnimateWindowTo(target, 190); }
+        else LayoutBallOnly(recenter: true);
         SetSelfPass(false); // 吸附期间穿透可能被误开:球窗由 WebView 圆外穿透负责即可
         StartLoops();
         SavePosition();
@@ -1443,26 +1557,52 @@ public partial class MainWindow : Window
         {
             // 透明背景需在初始化前设置才生效
             BallWeb.DefaultBackgroundColor = System.Drawing.Color.Transparent;
-            // Runtime 固定:WebView2 Evergreen 自动更新(2026-09-07 凌晨升至 152.0.4191.66)
-            // 后鼠标事件不再分发给页面——renderer 动画照常但 JS pointer 事件全灭,球完全
-            // 不可点。固定回 151.0.4129.101(长期验证正常)并放宽 TargetCompatibleBrowserVersion
-            // 允许 SDK 搭配;目录日后被 EdgeUpdate 清理时回退 Evergreen 默认。
-            var pinnedRuntime = @"C:\Program Files (x86)\Microsoft\EdgeWebView\Application\151.0.4129.101";
+            // Runtime 固定链:Evergreen 自动更新会改变呈现层行为(2026-09-07 升 152 后鼠标事件
+            // 全灭,9 月底 153/154 出现球 hwnd 角部滞留底板,复盘见 GHOST_DEBUG.md)。151 是长期
+            // 验证正常的版本。优先级:应用自带 Fixed Version(exe 旁 WebView2Fixed\<ver>\,不被
+            // EdgeUpdate 清理)→ 系统 151 固定目录 → Evergreen 默认(漂移告警见下方校验)。
             CoreWebView2Environment? env = null;
-            if (Directory.Exists(pinnedRuntime))
+            foreach (var (dir, ver) in new (string, string)[]
             {
+                (Path.Combine(AppContext.BaseDirectory, "WebView2Fixed", "151.0.4129.93"), "151.0.4129.93"),
+                (@"C:\Program Files (x86)\Microsoft\EdgeWebView\Application\151.0.4129.101", "151.0.4129.101"),
+            })
+            {
+                if (!File.Exists(Path.Combine(dir, "msedgewebview2.exe"))) continue;
                 try
                 {
-                    var opts = new CoreWebView2EnvironmentOptions { TargetCompatibleBrowserVersion = "151.0.4129.101" };
-                    env = await CoreWebView2Environment.CreateAsync(browserExecutableFolder: pinnedRuntime, userDataFolder: null, options: opts);
+                    var opts = new CoreWebView2EnvironmentOptions { TargetCompatibleBrowserVersion = ver };
+                    env = await CoreWebView2Environment.CreateAsync(browserExecutableFolder: dir, userDataFolder: null, options: opts);
+                    break;
                 }
-                catch { env = null; /* 版本不兼容等异常:回退 Evergreen 默认 */ }
+                catch { env = null; /* 版本不兼容等异常:试下一个候选 */ }
             }
             if (env != null) await BallWeb.EnsureCoreWebView2Async(env);
             else await BallWeb.EnsureCoreWebView2Async();
 
             var webDir = Path.Combine(AppContext.BaseDirectory, "Web");
             var cwv = BallWeb.CoreWebView2;
+
+            // 固定失效必须留痕:固定目录被 EdgeUpdate 清理后上面会按预设静默回退 Evergreen,
+            // 而呈现层行为随 Runtime 变化(2026-09 残影回归即 151→153 漂移触发,球 hwnd 角部
+            // 出现间歇性滞留底板;复盘见 GHOST_DEBUG.md)。漂移本身无任何症状,不在这里告警
+            // 的话可能数周都不会被发现。
+            try
+            {
+                var actualVer = cwv.Environment.BrowserVersionString;
+                if (!actualVer.StartsWith("151."))
+                {
+                    var why = "固定链(Fixed Version/系统151)均不可用或创建失败";
+                    var tip = $"WebView2 Runtime 期望 151.x,实际 {actualVer}({why})。" +
+                              "呈现层行为可能变化,残影/点击类问题回归先查这里。";
+                    File.AppendAllText(Path.Combine(RecordStore.DefaultDataDir, "error.log"),
+                        $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {tip}\n");
+                    // 托盘可能尚未初始化(InitTray 在窗口 Show 之后)——气泡丢就丢了,日志必达
+                    (Application.Current as App)?.Tray?.ShowBalloonTip(8000, "TimeDot", tip,
+                        System.Windows.Forms.ToolTipIcon.Warning);
+                }
+            }
+            catch { /* 告警失败不影响主流程 */ }
 
             // 通过 WebResourceRequested 拦截,将 https://app.local/* 映射到本地 Web 目录
             cwv.AddWebResourceRequestedFilter("https://app.local/*", CoreWebView2WebResourceContext.All);

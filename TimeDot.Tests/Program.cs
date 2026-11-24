@@ -296,6 +296,85 @@ internal static class Program
         var ts3 = new TodoStore(tdir);
         Check(ts3.Items.Count == 0, "待办文件损坏时静默从空开始");
 
+        // ---------- 待办先后依赖(NextTodo 思想) ----------
+        var ddir = TempDir();
+        var ds = new TodoStore(ddir);
+        var tA = ds.Add("设计稿")!;
+        var tB = ds.Add("前端开发")!;
+        var tC = ds.Add("联调")!;
+        Check(ds.SetDependency(tA.Id, tB.Id), "加依赖:A 是 B 的前置");
+        Check(ds.SetDependency(tA.Id, tB.Id), "重复加依赖幂等成功");
+        Check(!ds.SetDependency(tA.Id, tA.Id), "指向自身的依赖被拒");
+        Check(ds.RawItems.First(x => x.Id == tB.Id).BlockedBy.Contains(tA.Id), "依赖已持久化在 BlockedBy");
+
+        // 环检测:A→B 后再 B→A 必须拒绝;更长链 C→A…也拒绝
+        Check(!ds.SetDependency(tB.Id, tA.Id), "成环依赖被拒(2 节点)");
+        ds.SetDependency(tB.Id, tC.Id); // B 是 C 的前置:A→B→C
+        Check(!ds.SetDependency(tC.Id, tB.Id), "成环依赖被拒(3 节点)");
+        Check(!ds.SetDependency(tC.Id, tA.Id), "成环依赖被拒(长链)");
+
+        // 派生状态:可做/等待中;解锁计数
+        var all = ds.RawItems;
+        Check(TodoStore.IsReady(tA, all) && !TodoStore.IsReady(tB, all) && !TodoStore.IsReady(tC, all),
+              "可做=A,等待=B/C");
+        Check(TodoStore.OpenBlockers(tB, all) == 1 && TodoStore.OpenBlockers(tC, all) == 1, "等待中各压 1 项前置");
+        var btexts = TodoStore.OpenBlockerTexts(tB, all);
+        Check(btexts.Count == 1 && btexts[0] == "设计稿", "等待项可显示在等谁(前置文本)");
+        Check(TodoStore.UnlockCount(tA.Id, all) == 1, "完成 A 只解锁 B(C 仍等 B)");
+        Check(ds.Items[0].Id == tA.Id && ds.Items[^1].Done == false, "排序:可做在前,等待在后");
+
+        // 完成 A → B 变可做,C 仍等待(完成一件,下一件出现)
+        ds.Toggle(tA.Id);
+        all = ds.RawItems;
+        Check(TodoStore.IsReady(tB, all) && !TodoStore.IsReady(tC, all), "A 完成后 B 解锁,C 仍等待");
+        Check(TodoStore.UnlockCount(tA.Id, all) == 0, "完成后不再解锁任何项");
+        // 跳步:等待中的 C 也可直接完成(现实常有)
+        ds.Toggle(tC.Id);
+        Check(ds.Items.First(t => t.Id == tC.Id).Done, "等待中允许跳步直接完成");
+        // 重开已完成项:其后续可能因此变回等待中(NextTodo 规则)
+        ds.Toggle(tA.Id); // A 重新打开
+        all = ds.RawItems;
+        Check(!TodoStore.IsReady(tB, all) && TodoStore.OpenBlockers(tB, all) == 1,
+              "A 重开后其后续 B 变回等待中");
+        // 还原:A 完成(跳过重新等待 C 的过程,C 已是完成态)
+        ds.Toggle(tA.Id);
+        all = ds.RawItems;
+        Check(TodoStore.IsReady(tB, all), "A 再次完成后 B 又解锁");
+
+        // 拆除依赖
+        Check(ds.ClearDependency(tB.Id, tC.Id), "拆除 B→C 依赖");
+        Check(!ds.RawItems.First(x => x.Id == tC.Id).BlockedBy.Contains(tB.Id), "拆除后 C 不再被挡");
+        Check(!ds.ClearDependency(tB.Id, tC.Id), "重复拆除返回 false");
+
+        // 删除连带拆线 + 撤销恢复(含双向依赖)
+        ds = new TodoStore(TempDir());
+        var tP = ds.Add("P")!;
+        var tQ = ds.Add("Q")!;
+        ds.SetDependency(tP.Id, tQ.Id);
+        var snap = ds.RemoveWithUndo(tP.Id, out var blocked);
+        Check(snap != null && blocked.Count == 1 && blocked[0] == tQ.Id, "删除返回快照与被挡名单");
+        var raw = ds.RawItems;
+        Check(TodoStore.IsReady(raw.First(x => x.Id == tQ.Id), raw), "前置被删后 Q 视为可做");
+        Check(!ds.RawItems.First(x => x.Id == tQ.Id).BlockedBy.Contains(tP.Id), "删除连带清理引用");
+        var restored = ds.Restore(snap!);
+        raw = ds.RawItems;
+        Check(restored != null && restored.Id == tP.Id
+              && raw.First(x => x.Id == tQ.Id).BlockedBy.Contains(tP.Id)
+              && !TodoStore.IsReady(raw.First(x => x.Id == tQ.Id), raw), "撤销恢复:原 Id 回库且双向依赖接回");
+        Check(ds.Restore(snap!) == null, "重复恢复幂等返回 null");
+
+        // 重启往返:BlockedBy 序列化不丢
+        var dts = new TodoStore(ddir);
+        Check(dts.RawItems.First(x => x.Id == tA.Id).Done
+              && dts.RawItems.First(x => x.Id == tB.Id).BlockedBy.Contains(tA.Id)
+              && dts.RawItems.First(x => x.Id == tC.Id).BlockedBy.Count == 0,
+              "重启后依赖与状态往返不丢");
+
+        // 多行批量入库:拆分/空行跳过
+        var many = new TodoStore(TempDir());
+        Check(many.AddMany(new[] { "  ", "任务一", "", "任务二", "  任务三  " }) == 3, "多行拆分入库(空行跳过)");
+        Check(many.Items.Count == 3 && many.Items.Any(t => t.Text == "任务三"), "批量入库去空白");
+
         // ---------- 手动修改总时长 ----------
         Check(RecordStore.TryParseDuration("1:30", out var du1) && Math.Abs(du1 - 90) < 0.01, "解析 1:30 = 90s");
         Check(RecordStore.TryParseDuration("1:30:00", out var du2) && Math.Abs(du2 - 5400) < 0.01, "解析 1:30:00 = 5400s");

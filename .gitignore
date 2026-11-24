@@ -25,3 +25,5 @@ ui_verify.txt
 tools/ghost-shots/
 
 tools/.gh_token
+
+tools/wv2rt/
