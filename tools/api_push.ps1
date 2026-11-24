@@ -1,5 +1,7 @@
 ﻿# api_push.ps1 — 通过 GitHub API 把本地最终状态推送到 JetYeah/TimeDot main
 # (github.com 的 git 端点在本机网络不可达,api.github.com 可达——用 Git Database API 逐文件推送)
+# -MessageFile 指定提交信息文件(UTF-8);省略则用下方内置信息(仅对应 2026-09-08 那一版,勿再用于新推送)
+param([string]$MessageFile = '')
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $token = ([IO.File]::ReadAllText('D:\ClaudeCode\TimeDot-main\tools\.gh_token', [Text.Encoding]::UTF8)).Trim()
@@ -47,7 +49,8 @@ $newTree = Invoke-RestMethod -Uri "$api/git/trees" -Method Post -Headers $h -Bod
 Write-Host "新 tree: $($newTree.sha)"
 
 # 6. 建 commit(parent=远端 HEAD,干净的追加提交)
-$msg = @"
+#
+$msg = if ($MessageFile -ne '') { [IO.File]::ReadAllText($MessageFile, [Text.Encoding]::UTF8).TrimStart([char]0xFEFF) } else { @"
 TimeDot: Runtime 151 固定 + 数据层修复 + 残影问题终局修复与调试档案
 
 - WebView2 Runtime 固定到 151.0.4129.101(Evergreen 自动更新引入输入回归的规避)
@@ -55,7 +58,7 @@ TimeDot: Runtime 151 固定 + 数据层修复 + 残影问题终局修复与调�
 - 右下角残影根因定位(下层应用不重绘被显露区域)与修复(收起不缩窗,消灭显露区域)
 - GHOST_DEBUG.md: 两轮调试的完整档案(手段-实证-结论)
 - tools/: 残影复现/取证/值守工具集
-"@
+"@ }
 $commitBody = @{ message = $msg; tree = $newTree.sha; parents = @($remoteHead) } | ConvertTo-Json -Depth 5 -Compress
 $newCommit = Invoke-RestMethod -Uri "$api/git/commits" -Method Post -Headers $h -Body $commitBody -ContentType 'application/json' -TimeoutSec 60
 Write-Host "新 commit: $($newCommit.sha)"
